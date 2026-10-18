@@ -1,0 +1,21 @@
+# DSH web 服務（profile: web）。橋接靠它工作，必須先起來。
+# 安裝：sudo cp /root/qq-bridge/systemd/dsh-web.service /etc/systemd/system/ && sudo systemctl daemon-reload
+[Unit]
+Description=DeepSeek Harness web (profile: web, port 3080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=HOME=/root
+Environment=PATH=/root/.nvm/versions/node/v24.21.0/bin:/usr/local/bin:/usr/bin:/bin
+Environment=NODE_OPTIONS=--max-old-space-size=768
+WorkingDirectory=/root
+ExecStart=/root/.nvm/versions/node/v24.21.0/bin/dsh --profile web --port 3080 --no-open
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

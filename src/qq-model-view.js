@@ -61,7 +61,23 @@ export function compactModelMessage(message) {
     const canResolveByMessage = Number.isSafeInteger(message.seq) && message.seq > 0;
     result.media = compactMedia(result.media, canResolveByMessage);
   }
+  // 相對時間：讓模型不必自己減毫秒時間戳。喚醒提示要求「回得晚就引用」，
+  // 判斷依據就是這個 ageText（超过 4 分钟＝回得晚）。
+  if (Number.isFinite(result.time)) {
+    const age = relativeAgeText(result.time);
+    if (age) result.ageText = age;
+  }
   return result;
+}
+
+function relativeAgeText(ms) {
+  const diff = Date.now() - ms;
+  if (diff < 60000) return '刚刚';
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 60) return `${minutes}分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}小时前`;
+  return `${Math.floor(hours / 24)}天前`;
 }
 
 export function compactModelData(data) {

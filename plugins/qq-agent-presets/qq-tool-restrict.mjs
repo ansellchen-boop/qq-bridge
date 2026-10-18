@@ -109,7 +109,10 @@ const LOCAL_EXECUTION_TOOLS = [
   // 插件/cordis 运行期检查：能读宿主状态（0.1.7 起只有这两个名字）
   'cordis_inspect_list', 'cordis_inspect_query',
   // 本机文件 + 进程：plugin-guard 会改写配置并 spawn pnpm
-  'dsh_snapshot', 'dsh_rollback', 'incident_resolved',
+  // 本地偏差（2026-10-02，本部署）：本机未安装 dsh-plugin-guard，这三个名字在已安装包里
+  // 不存在 ⇒ restrict 抛错被吞（静默 no-op），verify:adaptation / test-preset-local-tools 会红。
+  // 已从名单移除；**若日后挂上 dsh-plugin-guard，请把下面这行加回来**：
+  // 'dsh_snapshot', 'dsh_rollback', 'incident_resolved',
   // 会话/交付/任务面
   // 注意：`todo_write` 与 `ask_user_question` **故意不在**此名单——它们是下面
   // SAFE_EXACT 允许的无害模型侧工具，两边不能自相矛盾。
@@ -153,6 +156,13 @@ const KNOWN_DANGEROUS_GLOBAL_TOOLS = [
   'dev_stage_list',
   'dev_stage_promote',
   'dev_uninject_plugin',
+  // 第三方搜索插件 dsh-free-search（2026-10-03 装入 web profile，v0.7.1）注册的
+  // 全局工具。它们由宿主层注册，绕过 src/mcp-web-search-safe.js 的 SSRF 加固
+  // 直接对外发 HTTP ⇒ 仿真会话必须在注册期就隐藏（执行期白名单仍兜底）。
+  'advanced_search',
+  'platform_search',
+  'free_search_test',
+  'multi_search',
 ]
 
 // 供 test-preset-local-tools.mjs 导入并与 DSH 真实工具名对账，避免两份名单漂移。
@@ -168,9 +178,71 @@ const SAFE_PREFIXES = [
 
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，
 // todo_write 仅维护任务列表。若后续 preset 不再挂载这些工具，保留无害。
+//
+// 本地偏差（2026-10-03 放行、2026-10-08 收回 compress，本部署）：ACP（billion-context）的
+// 上下文管理工具里，decompress / search_context / acp_status / acp_cache 继续放行，
+// 只有 compress 重回收紧口径（代码见 DISABLED_WITH_REASON，证据见本段末尾的 2026-10-08 更正）。
+// 理由（逐条核对过，不是"顺手加"）：
+//   1) 它们由 billion-context 的 **DSH 原生插件**在**全局层**注册：
+//      profile `web` 的 `package.json` → `dsh.profile.bundles` 含 `billion-context`；
+//      插件源码 `node_modules/billion-context/dist/agent/dsh-native.js` 有
+//      `inject=["tools","commands","agents"]` 与 `ctx.tools.register(toolDefinition(tool))`，
+//      工具集来自 `fetchManifest(base,"anthropic")`（⇒ 名字随上游版本变化，不要写进 restrict
+//      的 deny 名单：那份名单是靠 `scripts/scan-dsh-tool-names.mjs` 对账"真名"的，
+//      静态扫描只覆盖 `@deepseek-ai/dsh-*`，抓不到这些运行时工具名，加了会被判成假名）。
+//      因为注册在全局层，每个 QQ 仿真会话的 schema 里本来就有它们。
+//   2) 它们**没有** shell / 文件 / 进程 / 派生 agent 能力，只对本会话的历史做折叠与检索
+//      ——正是本名单所说的"无害模型侧工具"（对模型能力面而言等价于 todo_write）。
+//   3) ACP 会把"compression philosophy"注入 system prompt，等于要求模型在上下文变长时
+//      自行压缩；工具却被守卫挡住 = 让模型做一件做不到的事。实测 2026-10-03 已累积
+//      **32 次拒绝且全部是 `compress`**（group 会话 25 次、另一个会话 6 次、1 次），
+//      每次都白费一轮对话，模型偶尔还会在群里把这次失败念出来。
+//   4) 放行顺带省钱：上下文更早折叠 ⇒ 后续 cacheMiss（¥1/M）更少。
+//      ⚠️ 2026-10-08 更正：这一条被实测推翻，所以 compress 收回了，见本段末尾。
+// 注意：**自动压缩不依赖这些工具**（ACP 在 API 层自动折叠，QQ 会话日志里可见
+// `{"type":"compaction/end", ...}` 事件），所以这里放行的只是"模型手动压/取回"的能力，
+// 不是"能不能压缩"的前提；哪天真出问题，把这几行删掉即可回到严格口径。
+//
+// 2026-10-08 更正（收回 compress 的实测依据）：
+//   ① 每一次手动 compress 都会改写前綴 ⇒ 紧随其后的步骤整段重读：10-08 当天 5 次
+//      compress 各自带来 27K~37K tokens 的 cacheMiss（约 ¥0.027~0.037/次），合计约
+//      ¥0.15，占当天花费（¥1.73）近一成；而它省下的是 cacheHit（¥0.02/M）——
+//      一次前綴重写与同一段内容重读之间差 50 倍，这笔账算不过来。
+//   ② 6 个会话累计 52 次调用里，compress 占了 52 次中的绝大多数（同一批会话里
+//      decompress 0 次、search_context 0 次、acp_status 7 次、acp_cache 1 次），
+//      即放行的 5 个上下文管理工具里只有它在被高频使用 ⇒ 只收回它一个。
+//   ③ 自动折叠不依赖它：同一批会话日志里有 compaction/start 32 次、compaction/end
+//      32 次（ACP 在 API 层自动折叠），少了 compress 不会让上下文无限膨胀。
+//   ④ 拒绝的成本远低于放行：一次被拒的调用只是一个 100~300 token 的步骤（约
+//      ¥0.001），比放行后 ¥0.03 的前綴重写便宜一个数量级；而且下面的
+//      DISABLED_WITH_REASON 会给模型一句明确解释，避免 2026-10-03 那种
+//      「被拒了但不知道自己错在哪」的反复尝试（当时累积 32 次拒绝）。
+//   要再放开：把 compress 加回 SAFE_EXACT，并从 DISABLED_WITH_REASON 删掉即可。
 const SAFE_EXACT = new Set([
   'ask_user_question',
   'todo_write',
+  // 跨会话共享记忆（dsh-memory 1.0.0，2026-10-16 放行）：这两个工具只在记忆目录内读写
+  // MEMORY.md / CONFLICTS.md / runs.jsonl，没有 shell、exec、subagent 能力。
+  'memory_read', 'memory_save',
+  // 原生联网搜索/抓取（2026-10-17 切到 deepseek-search-tools provider；只读，无执行面）
+  'web_search', 'web_fetch',
+  // ACP / billion-context 上下文管理工具（见上方本地偏差说明与 2026-10-08 更正）：
+  // 2026-10-09：compress 加回本集合（当天凌晨实测：把 compress 关掉后 bili 的折叠完全停摆
+  // ——bili 只发提醒，动手的是模型的 compress 呼叫；10-09 呼叫 11 次全被拒、fold 0 笔）。
+  'compress',
+  'decompress',
+  'search_context',
+  'acp_status',
+  'acp_cache',
+])
+
+// 2026-10-08：曾收回 compress（理由：泛泛一句「不在白名单内」会让模型反复重试）。
+// 2026-10-09：**重新开放**。10-08 19:58 收回后实测：bili 自己不会折叠，它只发 T1 提醒，
+// 真正折叠要模型叫 compress——最后一次成功呼叫 2026-10-08T10:12:36Z 与 bili 最后一笔
+// fold（b79）同秒，而 10-09 呼叫 11 次全被拒、fold 0 笔、上下文只涨不缩。
+// 保留本表结构（日后若要再关某个工具，往这里加即可），但不再拦截 compress。
+const DISABLED_WITH_REASON = new Map([
+  // 目前不拦任何工具。
 ])
 
 export function apply(ctx) {
@@ -197,6 +269,8 @@ export function apply(ctx) {
   ctx.tools.guard((exec) => {
     const name = exec?.name
     if (typeof name !== 'string' || name.length === 0) return '工具名无效，已拒绝'
+    const disabledReason = DISABLED_WITH_REASON.get(name)
+    if (disabledReason) return disabledReason
     if (SAFE_EXACT.has(name)) return
     if (SAFE_PREFIXES.some((prefix) => name.startsWith(prefix))) return
     return `工具 "${name}" 不在 QQ 桥接白名单内，已拒绝（仅允许 QQ MCP 工具与无害模型侧工具）`

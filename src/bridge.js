@@ -28,6 +28,40 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger } from './token-ledger.js';
+
+// —— 发送限流提示：告诉调用方还要等多久，而不是只丢一句「请稍后再试」 ——
+function sendRateLimitError(st, sendCfg, needCount, now = Date.now()) {
+  const maxPerMinute = Number(sendCfg?.maxSendPerMinute) || 0;
+  const maxPerHour = Number(sendCfg?.maxSendPerHour) || 0;
+  const times = Array.isArray(st?.sendTimes) ? st.sendTimes : [];
+  const minute = times.filter((t) => now - t < 60000);
+  const hour = times.filter((t) => now - t < 3600000);
+  let retryAfterSec = 0;
+  const parts = [];
+  if (maxPerMinute > 0 && minute.length + needCount > maxPerMinute) {
+    const need = minute.length + needCount - maxPerMinute;
+    const sorted = minute.slice().sort((a, b) => a - b);
+    const trigger = sorted[Math.min(need, sorted.length) - 1] ?? now;
+    retryAfterSec = Math.max(retryAfterSec, Math.ceil((trigger + 60000 - now) / 1000));
+    parts.push('每分钟上限 ' + maxPerMinute + ' 条，最近一分钟已发 ' + minute.length + ' 条');
+  }
+  if (maxPerHour > 0 && hour.length + needCount > maxPerHour) {
+    const need = hour.length + needCount - maxPerHour;
+    const sorted = hour.slice().sort((a, b) => a - b);
+    const trigger = sorted[Math.min(need, sorted.length) - 1] ?? now;
+    const wait = Math.ceil((trigger + 3600000 - now) / 1000);
+    retryAfterSec = Math.max(retryAfterSec, wait);
+    parts.push('每小时上限 ' + maxPerHour + ' 条，最近一小时已发 ' + hour.length + ' 条');
+  }
+  const human = retryAfterSec >= 60
+    ? Math.ceil(retryAfterSec / 60) + ' 分钟'
+    : retryAfterSec + ' 秒';
+  return {
+    retryAfterSec,
+    error: '发送频率超限' + (parts.length ? '（' + parts.join('；') + '）' : '')
+      + '：请等约 ' + human + ' 再发；等待期间不要反复重试，先去处理别的事，到点再补发'
+  };
+}
 import {
   loadSlang,
   saveSlang,
@@ -1399,6 +1433,86 @@ async function main() {
    * 出站语音的内容审计：与文本一致，凡是「疑似敏感信息 / 含会话令牌」的**文件名**
    * 都不允许外发（语音的音频内容本身无法审计，但文件名同样会泄露路径与项目信息）。
    */
+  /**
+   * 开场字轮换（桥接层硬提醒 + 发送口拦截）。
+   *
+   * 背景（2026-10-10 实测）：角色卡第 18 条早就写了“同一个开场字最多 2 次”，
+   * 但 58 条外发里「哦」9 条、「行」9 条、「？」5 条，三个字吃掉了 40% 的开头。
+   * 教训与“口癖配额”那次一致：写在角色卡里的规则进不了决策回路，必须由桥接层
+   * 在每回合提示词末尾塞入真实计数，并在发送口做一次拦截。
+   */
+  const OPENER_LAZY_CHARS = ['哦', '行', '？', '?', '嗯', '这', '那', '啊', '唉', '额'];
+  const OPENER_LOOKBACK = 6;
+  const OPENER_MAX_BLOCKS_PER_TURN = 2;
+  const openerBlockLog = new Map();
+
+  function openerCharOfV2(text) {
+    let s = String(text ?? '').replace(/^[\s\u200b\u3000]+/, '');
+    if (!s) return '';
+    const m = /^(?:@[^\s]{1,24}\s*|[\[【][^\]】]{0,24}[\]】]\s*)*([\s\S])/.exec(s);
+    s = m ? m[1] : s[0];
+    return s || '';
+  }
+
+  function openerStatsV2(st) {
+    const list = Array.isArray(st?.recentMessages) ? st.recentMessages : [];
+    const seq = [];
+    for (let i = list.length - 1; i >= 0 && seq.length < OPENER_LOOKBACK; i--) {
+      const m = list[i];
+      if (!m || !m.isSelf) continue;
+      const t = String(m.text ?? m.plain ?? '');
+      if (!t.trim()) continue;
+      const ch = openerCharOfV2(t);
+      if (ch) seq.unshift(ch);
+    }
+    const counts = {};
+    for (const ch of seq) counts[ch] = (counts[ch] || 0) + 1;
+    const hot = OPENER_LAZY_CHARS.filter((c) => (counts[c] || 0) >= 2);
+    const last = seq[seq.length - 1] || '';
+    const prev = seq[seq.length - 2] || '';
+    return { seq, counts, hot, last, prev, collide: !!last && last === prev };
+  }
+
+  function openerVarietyLineV2(key, st) {
+    const { seq, counts, hot, collide } = openerStatsV2(st);
+    if (seq.length < 2) return '';
+    const shown = seq.map((c) => `「${c}」`).join('');
+    const extra = collide && OPENER_LAZY_CHARS.includes(seq[seq.length - 1]) ? [seq[seq.length - 1]] : [];
+    const banned = [...new Set([...hot, ...extra])];
+    if (!banned.length) {
+      return `【开场字】你最近 ${seq.length} 条发言的开头是 ${shown}——这回合若发言，开头别和上一条撞字。`;
+    }
+    const detail = banned.map((c) => `「${c}」${counts[c] ?? 1} 次`).join('、');
+    const list = banned.map((c) => `「${c}」`).join('');
+    return `【开场字·硬提醒】你最近 ${seq.length} 条发言的开头是 ${shown}，其中 ${detail} 已经重复。这回合你要是发言：第一个字不许再用 ${list}（桥接层会在发送口拦截重发，白费一次工具调用）。开场直接说事、点对方名字、或用没出现过的字起头：得了吧／就这／少来／嚯／笑死／我懂了／说实话／说真的／瞅瞅你／呵。`;
+  }
+
+  function openerGuardCheckV2(key, messages) {
+    if (cfg.socialV2?.openerGuard?.enabled === false) return null;
+    const list = Array.isArray(messages) ? messages : [];
+    const first = list.find((m) => String(m ?? '').trim());
+    if (!first) return null;
+    const text = String(first).trim();
+    if (text.length <= 2) return null;
+    const ch = openerCharOfV2(text);
+    if (!ch || !OPENER_LAZY_CHARS.includes(ch)) return null;
+    const { counts, hot, last, seq } = openerStatsV2(getSocialV2State(key));
+    if (seq.length < 3) return null;
+    const banned = new Set(hot);
+    if (last && OPENER_LAZY_CHARS.includes(last)) banned.add(last);
+    if (!banned.has(ch)) return null;
+    const now = Date.now();
+    const rec = openerBlockLog.get(key) ?? { n: 0, at: 0 };
+    if (now - rec.at > 180000) rec.n = 0;
+    if (rec.n >= OPENER_MAX_BLOCKS_PER_TURN) {
+      rec.n = 0; rec.at = now; openerBlockLog.set(key, rec);
+      log(`[开场字] ${key} 已拦截 ${OPENER_MAX_BLOCKS_PER_TURN} 次，本条放行（避免死循环）`);
+      return null;
+    }
+    rec.n += 1; rec.at = now; openerBlockLog.set(key, rec);
+    return { char: ch, error: `【开场字重复】你最近 ${seq.length} 条发言里「${ch}」已用 ${counts[ch] ?? 1} 次，这条又以「${ch}」起头。原意别改，换个开头重发：直接说事、点对方名字、或用没出现过的字（得了吧／就这／少来／嚯／笑死／说实话）。` };
+  }
+
   function assertOutboundAuditOk(key, subject) {
     const text = String(subject ?? '');
     const hasKnownToken = [...KNOWN_AGENT_TOKENS].some((t) => t && text.includes(t));
@@ -2251,6 +2365,10 @@ async function main() {
   const collectors = new Map(); // sessionId -> turn collector
   const sendToolSucceededSessions = new Set(); // sessionId：当前 turn 内 MCP 发送类工具至少成功一次
   const v2TurnStartAt = new Map(); // sessionId -> timestamp：reserved2 turn 开始时间，用于判断是否“无行动”
+  // sessionId -> 最近一次收到该会话 DSH 事件帧的时间戳：busy 卡死租约的「活动」依据。
+  // 正常的 qq_wait_for_messages 长轮询每 2~3 分钟就会产生 tool/call + tool/result 帧，真在跑不会误判。
+  const v2SessionActivityAt = new Map();
+  const BUSY_STALL_LEASE_MS = 12 * 60 * 1000;
   const toolCallNames = new Map(); // sessionId -> Map<callId, toolName>：用于结果日志关联工具名
   const pendingSendToolCalls = new Map(); // sessionId -> Set<callId>：等待 tool/result 的发送类调用
   // reserved2 防“忘记设置唤醒条件”：key -> 当前是否等待 AI 处理唤醒回合 / 本回合已更新唤醒配置 / 连续未设置次数
@@ -2378,6 +2496,7 @@ async function main() {
     }
     if (!restored) return;
     collectors.set(sessionId, collector);
+    v2SessionActivityAt.set(sessionId, Date.now());
     log(`重连后恢复了进行中的回合（${sessionId}，turn ${[...open].join(',')}）`);
   }
 
@@ -4871,7 +4990,9 @@ async function main() {
             const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
             const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
             if ((maxPerMinute > 0 && recentMinute + messages.length > maxPerMinute) || (maxPerHour > 0 && recentHour + messages.length > maxPerHour)) {
-              sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
+              const lim = sendRateLimitError(st, sendCfg, messages.length, now);
+              log('[限流] ' + key + ' 发送被拦：' + lim.error);
+              sendJson({ ok: false, error: lim.error, retryAfterSec: lim.retryAfterSec }, 429);
               return;
             }
             // 先预占发送额度，避免并发绕过限频
@@ -4994,6 +5115,13 @@ async function main() {
               return;
             }
           }
+          const openerHit = req.headers['x-agent-token'] ? openerGuardCheckV2(key, messages) : null;
+          if (openerHit) {
+            log(`[开场字] ${key} 拦截重复开场「${openerHit.char}」`);
+            appendActivity(`${key} [开场字] 拦截重复开场「${openerHit.char}」`);
+            sendJson({ ok: false, error: openerHit.error }, 400);
+            return;
+          }
           const delays = computeGapsV2(messages, gapMode, gapMs, gaps, sendCfg);
           // 先做发送频率检查并预占额度，再解析引用目标，避免未限流的引用查询打爆 OneBot。
           const st = getSocialV2State(key);
@@ -5003,7 +5131,9 @@ async function main() {
           const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
           const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
           if ((maxPerMinute > 0 && recentMinute + messages.length > maxPerMinute) || (maxPerHour > 0 && recentHour + messages.length > maxPerHour)) {
-            sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
+            const lim = sendRateLimitError(st, sendCfg, messages.length, now);
+            log('[限流] ' + key + ' 发送被拦：' + lim.error);
+            sendJson({ ok: false, error: lim.error, retryAfterSec: lim.retryAfterSec }, 429);
             return;
           }
           // 先预占发送额度，避免并发绕过限频
@@ -5099,7 +5229,9 @@ async function main() {
           const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
           const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
           if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
-            sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
+            const lim = sendRateLimitError(st, sendCfg, 1, now);
+            log('[限流] ' + key + ' 发送被拦：' + lim.error);
+            sendJson({ ok: false, error: lim.error, retryAfterSec: lim.retryAfterSec }, 429);
             return;
           }
           st.sendTimes.push(now);
@@ -5478,7 +5610,9 @@ async function main() {
             const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
             const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
             if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
-              sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
+              const lim = sendRateLimitError(st, sendCfg, 1, now);
+              log('[限流] ' + key + ' 发送被拦：' + lim.error);
+              sendJson({ ok: false, error: lim.error, retryAfterSec: lim.retryAfterSec }, 429);
               return;
             }
             st.sendTimes.push(now);
@@ -6589,7 +6723,9 @@ async function main() {
             const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
             const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
             if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
-              sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
+              const lim = sendRateLimitError(st, sendCfg, 1, now);
+              log('[限流] ' + key + ' 发送被拦：' + lim.error);
+              sendJson({ ok: false, error: lim.error, retryAfterSec: lim.retryAfterSec }, 429);
               return;
             }
             st.sendTimes.push(now);
@@ -7794,6 +7930,17 @@ async function main() {
     if (st.preSleepWaitSatisfiedAt && (!st.lastIncomingAt || st.lastIncomingAt <= st.preSleepWaitSatisfiedAt)) return false;
     // 已经做过一次沉睡前观察（可能等到了新消息并已把新消息返回给 AI），只要 AI 之后没有参与、也没有更新的消息，就允许直接沉睡。
     if (st.preSleepWaitObservedAt && (!st.lastIncomingAt || st.lastIncomingAt <= st.preSleepWaitObservedAt)) return false;
+    // 已读水位放行（治“活跃群里连续 5 分钟静默永远不成立”的死循环）：
+    // AI 在最后一次发言之后看过至少一条新消息、并且已经看到当前最新水位 → 视为“我看过了、我不参与”，可以直接收尾沉睡。
+    // 保留原防护：回复完却没有新消息可看时，仍然必须等满观察窗口或等到新消息。
+    // 只看“最后一次发言之后有没有看过新消息”，不要求“追平最新一条”：
+    // 活跃群里十几秒就来一条新消息，要求 seenSeq >= lastUnreadSeq 等于永远不放行（原 5 分钟静默窗口的死循环升级版）。
+    if (Number(st.lastNewMsgSeenSeq) > 0
+      && Number(st.lastNewMsgSeenAt) > 0
+      && (Number(st.lastAiReplyAt) || 0) <= Number(st.lastNewMsgSeenAt)) {
+      log(`[reserved2] 沉睡前观察放行（看过新消息：水位 ${st.lastNewMsgSeenSeq}，当前最新未读 ${st.lastUnreadSeq}，之后没再发言）`);
+      return false;
+    }
     return true;
   }
 
@@ -7869,6 +8016,8 @@ async function main() {
         preSleepWaitAccumMs: 0,
         lastUnreadSeq: 0,
         lastReadThroughSeq: 0,
+        lastNewMsgSeenSeq: 0,
+        lastNewMsgSeenAt: 0,
         modelSeenSeqs: new Set(),
         activeTopics: [],
         pendingThoughts: [],
@@ -7937,6 +8086,8 @@ async function main() {
             lastUnreadSeq: Number(val.lastUnreadSeq) || 0,
             lastReadThroughSeq: Number.isSafeInteger(val.lastReadThroughSeq) && val.lastReadThroughSeq >= 0
               ? Math.min(val.lastReadThroughSeq, Number(val.lastUnreadSeq) || 0) : 0,
+            lastNewMsgSeenSeq: Number(val.lastNewMsgSeenSeq) || 0,
+            lastNewMsgSeenAt: Number(val.lastNewMsgSeenAt) || 0,
             modelSeenSeqs: new Set(),
             activeTopics: Array.isArray(val.activeTopics) ? val.activeTopics : [],
             pendingThoughts: Array.isArray(val.pendingThoughts) ? val.pendingThoughts : [],
@@ -8025,6 +8176,8 @@ async function main() {
           preSleepWaitAccumMs: st.preSleepWaitAccumMs || 0,
           lastUnreadSeq: st.lastUnreadSeq || 0,
           lastReadThroughSeq: st.lastReadThroughSeq || 0,
+          lastNewMsgSeenSeq: st.lastNewMsgSeenSeq || 0,
+          lastNewMsgSeenAt: st.lastNewMsgSeenAt || 0,
           activeTopics: Array.isArray(st.activeTopics) ? st.activeTopics.slice(-50) : [],
           pendingThoughts: Array.isArray(st.pendingThoughts) ? st.pendingThoughts.slice(-50) : [],
           memberImpressions: st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {},
@@ -8094,7 +8247,7 @@ async function main() {
       lines.push('【进行中的话题】');
       for (const t of topics.slice(-10)) {
         const ago = t.lastMentionAt ? Math.round((Date.now() - t.lastMentionAt) / 60000) : 0;
-        const stale = t.lastMentionAt && Date.now() - Number(t.lastMentionAt) > 2 * 60 * 60 * 1000 ? '（已搁置）' : '';
+        const stale = t.lastMentionAt && Date.now() - Number(t.lastMentionAt) > 24 * 60 * 60 * 1000 ? '（已搁置）' : '';
         lines.push(`- ${t.text}${stale}（${ago > 0 ? ago + '分钟前' : '刚刚'}）${t.pendingQuestion ? `；待追问：${t.pendingQuestion}` : ''}`);
       }
     }
@@ -8122,12 +8275,12 @@ async function main() {
     if (!st) return;
     const text = redactKnownTokensOnly(String(content ?? '')).trim();
     const cat = String(category || '').trim();
-    // 轻量清理：过期想法移除；超过 24h 未提起的话题移除（避免无限膨胀）。
+    // 轻量清理：过期想法移除；超过 72h 未提起的话题移除（避免无限膨胀）。
     if (Array.isArray(st.pendingThoughts)) {
       st.pendingThoughts = st.pendingThoughts.filter((t) => t && (!t.expiresAt || Date.now() < Number(t.expiresAt)));
     }
     if (Array.isArray(st.activeTopics)) {
-      st.activeTopics = st.activeTopics.filter((t) => t && (!t.lastMentionAt || Date.now() - Number(t.lastMentionAt) < 24 * 60 * 60 * 1000));
+      st.activeTopics = st.activeTopics.filter((t) => t && (!t.lastMentionAt || Date.now() - Number(t.lastMentionAt) < 72 * 60 * 60 * 1000));
     }
     if (cat === 'activeTopic' && text) {
       if (!Array.isArray(st.activeTopics)) st.activeTopics = [];
@@ -8153,13 +8306,13 @@ async function main() {
       const existing = st.pendingThoughts.find((t) => t && String(t.text || '') === text);
       if (existing) {
         existing.createdAt = Date.now();
-        existing.expiresAt = Date.now() + (Number(extra.expiresAtMs) || 2 * 60 * 60 * 1000);
+        existing.expiresAt = Date.now() + (Number(extra.expiresAtMs) || 12 * 60 * 60 * 1000);
         if (extra.motivation) existing.motivation = redactKnownTokensOnly(String(extra.motivation)).slice(0, 50);
       } else {
         st.pendingThoughts.push({
           text: text.slice(0, 200),
           createdAt: Date.now(),
-          expiresAt: Date.now() + (Number(extra.expiresAtMs) || 2 * 60 * 60 * 1000),
+          expiresAt: Date.now() + (Number(extra.expiresAtMs) || 12 * 60 * 60 * 1000),
           motivation: redactKnownTokensOnly(String(extra.motivation || 'curiosity')).slice(0, 50)
         });
       }
@@ -9370,8 +9523,19 @@ async function main() {
     // Bound receipts by the actual unread buffer; historical/self messages need no receipt.
     const unread = new Set(st.unread.map((m) => m.seq));
     st.modelSeenSeqs = new Set([...st.modelSeenSeqs || []].filter((seq) => unread.has(seq)));
+    const prevSeen = Number(st.lastNewMsgSeenSeq) || 0;
+    let newestNew = prevSeen;
     for (const msg of messages) {
-      if (Number.isSafeInteger(msg?.seq) && msg.seq > 0 && unread.has(msg.seq)) st.modelSeenSeqs.add(msg.seq);
+      if (Number.isSafeInteger(msg?.seq) && msg.seq > 0 && unread.has(msg.seq)) {
+        if (msg.seq > newestNew) newestNew = msg.seq;
+        st.modelSeenSeqs.add(msg.seq);
+      }
+    }
+    // 只要本次把「比上次水位更新的未读消息」交到了 AI 手上，就刷新水位与时间（纯数字，可持久化）。
+    // 不能靠 modelSeenSeqs 判断“新消息”：唤醒快照会先把消息标成 seen，AI 之后读同一条就不再算“新”。
+    if (newestNew > prevSeen) {
+      st.lastNewMsgSeenSeq = newestNew;
+      st.lastNewMsgSeenAt = Date.now();
     }
     return readThroughSeqV2(st);
   }
@@ -9450,13 +9614,15 @@ async function main() {
     return { purpose: 'reply', quietMs, remainingQuietMs: Math.max(0, quietMs - elapsedMs) };
   }
 
-  function buildWakePromptV2(key, reason) {
+  function buildWakePromptBodyV2(key, reason) {
     const roleState = readRoleState();
-    const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+    const roleLine = roleState.role ? `【当前角色】${roleState.role}\n\n${roleHintForMode('v2')}\n\n` : '';
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     const memoryText = formatMemoryV2(st);
     const memoryLine = memoryText ? `${memoryText}\n\n` : '';
+    const longTermMemoryLine = "【跨会话长期记忆】你有一个跨会话共用的长期记忆库：memory_save 写、memory_read 读，群聊与私聊共用同一份（和上面按会话的轻量记忆不是一回事）。注意这两个是**可以直接调用的 DSH 工具**，工具名就叫 memory_read / memory_save，没有 mcp__snowluma__ 前缀；要判断自己有没有这个工具，别看 qq_get_prompt 的 enabledTools（那里只列 snowluma 的工具），直接调一次 memory_read(scope=\"user\") 就能读到全部跨会话记忆。遇到以后还会用到的信息，就在本轮结束前用 memory_save 记一条（scope 填 \"user\"，topic 用 kebab-case 短标识，一条只写一件事）：群友的偏好或雷点、谁答应过什么、群里的固定梗与叫法、你自己立过的人设。私聊里被问起群里的事、或要回忆以前说过什么，先调 memory_read(scope=\"user\") 读一遍再开口；读不到才说读不到，别凭猜、也别推说自己没挂这个工具。只有确实值得留下的才写，别记流水账。\n\n";
+    const webToolLine = "【搜索工具】联网搜索／抓取优先用原生工具 web_search / web_fetch；如果你在工具清单里没看到它们，就用 mcp__web-search-safe__web_search / mcp__web-search-safe__web_fetch——同一套联网通道，照常可用，别因为「看起来像是旧的」就放弃搜索。需要事实、新闻、版本号、时效性信息时必须真去搜一次，别凭记忆编；抓正文用 web_fetch（或对应的 _web_fetch）。\n\n";
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
     // 避免唤醒 prompt 出现两份黑话表。
     const participationText = formatParticipationV2(st);
@@ -9492,7 +9658,7 @@ async function main() {
     if (wcTr.anyMessage) wcTriggers.push('任意消息');
     if (Number(wcTr.probability) > 0) wcTriggers.push(`概率${wcTr.probability}`);
     const wakeLine = `【当前唤醒】${wcMode}，${wcTime}${wcTriggers.length ? `；触发：${wcTriggers.join('/')}` : ''}\n\n`;
-    const base = roleLine + tokenLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + participationLine + preSleepLine;
+    const base = roleLine + tokenLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + longTermMemoryLine + webToolLine + participationLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }
@@ -9503,17 +9669,23 @@ async function main() {
       return `${base}【回复检查】${key}\n原因：你刚刚发送过消息，现在回来检查是否有人回复。\n已有回复时先看消息，需要短静默就用 qq_wait_for_messages(purpose="reply") 判断对方是否说完；如果没人回你，不用硬补一句，但也不要立刻潜水——先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成沉睡前观察：没人说话可收尾；有人说话则查看 newMessages，不需要你参与也可直接收尾（qq_mark_read 或 qq_set_wake_config）。`;
     }
     if (reason === 'proactiveCheck') {
-      return `${base}【主动机会】${key}\n原因：群里已经安静了一段时间，这是一次你可以主动冒泡的机会。\n优先主动开个话题、追问上次没聊完的事、分享一个刚想到的想法；如果一时想不到，可以用 mcp__web-search-safe__web_search 搜一下当前热点/时事/网络热梗，再结合记忆里的群友兴趣挑一个自然角度。只要内容自然，就大胆开口；如果实在没话想说，再安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
+      return `${base}【主动机会】${key}\n原因：群里已经安静了一段时间，这是一次你可以主动冒泡的机会。\n优先主动开个话题、追问上次没聊完的事、分享一个刚想到的想法；如果一时想不到，可以用 web_search 搜一下当前热点/时事/网络热梗，再结合记忆里的群友兴趣挑一个自然角度。只要内容自然，就大胆开口；如果实在没话想说，再安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
     }
     if (reason === 'poke') {
       return `${base}【唤醒】${key}\n原因：有人拍了一拍（可能拍了你，也可能拍了别人）。\n先看未读/最近消息里的 [拍一拍] 事件：如果是拍你，可以自然回应一句，也可以用 qq_send_poke 回一个拍一拍；如果是拍别人，觉得有趣也可以接梗。除了回应，偶尔也可以主动戳一下正在聊的人/熟人，像真人手贱/提醒/逗一下，但别频繁。不想接就安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
     }
-    return `${base}【唤醒】${key}\n原因：${reason}\n【行动前】先判断：群里在聊什么？热闹还是冷清？有没有人直接找你？对方说完了吗？你有没有真正想说的？\n如果群聊正热但没人叫你，可以插一句有趣的/相关的，插不上再看情况潜水；不要一上来就划走。\n【引用：只在必要时用】只有你这条消息指向的人或消息并非最新一条别人的消息，或者你连续的几句话中不同消息指代的是不同的消息或人时，才用 qq_reply 或 qq_send_message 的 replyToMessageId 指向具体那条；其他情况不要引用，别让对方猜。\n你可以调用工具查看未读消息、人设、状态，自行决定是否发言；决定潜水前必须按上面的【沉睡前强制等待】先等够观察窗口。`;
+    return `${base}【唤醒】${key}\n原因：${reason}\n【行动前】先判断：群里在聊什么？热闹还是冷清？有没有人直接找你？对方说完了吗？你有没有真正想说的？\n如果群聊正热但没人叫你，可以插一句有趣的/相关的，插不上再看情况潜水；不要一上来就划走。\n【引用/点名：隔得远就必须指清】你要回的那条和最新一条之间隔了 5 条及以上（数一数中间有几条消息）时，必须用 qq_reply 或 qq_send_message 的 replyToMessageId 引用那一条（快照或读消息里那条的 seq / messageId 都能填）；只隔 1~4 条就别引用，别动辄挂着引用。**另一种必须引用的情况是回得晚**：你要回的那条消息如果距离现在已经超过 4 分钟（看快照里那条的 ageText：「6分钟前」「1小时前」这种就是回得晚，不用自己换算时间戳），即使只隔一两条也必须引用，回得越晚越要引用——隔了这么久对方早换话题了，不引用会显得你反应慢半拍还不知道在回谁。群聊里如果被回的人可能已经翻过去了，再带上 atUserId 点名。已引用就不必再 @，反之亦然。别让对方看到你的回复却不知道你在回哪一句。\n你可以调用工具查看未读消息、人设、状态，自行决定是否发言；决定潜水前必须按上面的【沉睡前强制等待】先等够观察窗口。`;
+  }
+
+  function buildWakePromptV2(key, reason) {
+    const body = buildWakePromptBodyV2(key, reason);
+    const line = openerVarietyLineV2(key, getSocialV2State(key));
+    return line ? `${body}\n\n${line}` : body;
   }
 
   function buildWakeReminderPromptV2(key) {
     const roleState = readRoleState();
-    const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+    const roleLine = roleState.role ? `【当前角色】${roleState.role}\n\n${roleHintForMode('v2')}\n\n` : '';
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     const preSleepMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
@@ -9643,12 +9815,45 @@ async function main() {
     log(`[reserved2] 已安排回复检查唤醒 ${key}，${Math.round(delay / 1000)}s 后检查`);
   }
 
+  /**
+   * busy 卡死租约（治本）：v2TurnStartAt / collectors / promptQueues.running 这三处状态都只在
+   * 「该回合的结束帧」到达时才清理。这一帧一旦丢失（DSH 正好在做上下文压缩、断线重连、异常中断），
+   * 该会话就被永久判定为 busy：后续唤醒只会被塞进 pendingWakeReasons，没有任何路径能自我恢复
+   * （2026-10-05 22:21 → 2026-10-06 12:18 群聊沉默 14 小时即此因）。
+   *
+   * 三个条件同时成立才强制解除，避免误杀真正的长回合：
+   *   ① 该会话已经积压了唤醒原因（说明确实有消息在等它）；
+   *   ② 距最近一次收到该会话的 DSH 帧已超过 BUSY_STALL_LEASE_MS（真在跑就会有帧）；
+   *   ③ 确实清掉了某些 busy 状态。
+   */
+  function releaseStuckBusyV2(key, sid, idleMs) {
+    const cleared = [];
+    if (sid && v2TurnStartAt.has(sid)) { v2TurnStartAt.delete(sid); cleared.push('turnStartAt'); }
+    if (sid && collectors.has(sid)) { collectors.delete(sid); cleared.push('collector'); }
+    if (sid) v2SessionActivityAt.delete(sid);
+    const q = promptQueues.get(key);
+    if (q) {
+      if (q.running) { q.running = false; cleared.push('queueRunning'); }
+      if (q.queue.length) { const n = q.queue.length; q.queue.length = 0; cleared.push(`queueDrop${n}`); }
+    }
+    if (pendingWakeKeys.has(key)) { pendingWakeKeys.delete(key); cleared.push('pendingWakeKeys'); }
+    disarmPendingWakeLease(key);
+    if (cleared.length) {
+      log(`[reserved2] ⚠️ ${key} busy 状态判定为卡死（${Math.round(idleMs / 60000)} 分钟无 DSH 帧、且有排队唤醒），已强制解除：${cleared.join('/')}`);
+    }
+    return cleared.length > 0;
+  }
+
   function isConversationBusyV2(key, st) {
     if (st && st.pendingWakeTimer) return true;
     if (pendingWakeKeys.has(key)) return true;
+    const sid = state.sessions[key];
+    if (sid && Array.isArray(st?.pendingWakeReasons) && st.pendingWakeReasons.length > 0) {
+      const last = v2SessionActivityAt.get(sid) ?? v2TurnStartAt.get(sid) ?? 0;
+      if (last > 0 && Date.now() - last > BUSY_STALL_LEASE_MS) releaseStuckBusyV2(key, sid, Date.now() - last);
+    }
     const q = promptQueues.get(key);
     if (q && (q.running || q.queue.length > 0)) return true;
-    const sid = state.sessions[key];
     if (sid && (v2TurnStartAt.has(sid) || collectors.has(sid))) return true;
     return false;
   }
@@ -10382,6 +10587,7 @@ async function main() {
             }
             // 追踪当前 turn 是否成功调用过 MCP 发送类工具：
             if (!isCurrentSession(key, frame.sessionId)) continue;
+            v2SessionActivityAt.set(frame.sessionId, Date.now()); // busy 租约心跳：该会话任何 DSH 帧都算活动
             // 只有“发送成功”才跳过自动转发；如果工具调用失败，仍允许 AI 的文本正常发出。
             if (frame.event.type === 'turn/start') {
               sendToolSucceededSessions.delete(frame.sessionId);
@@ -10437,9 +10643,16 @@ async function main() {
                 }
               }
             }
-            const collector = collectors.get(frame.sessionId) ?? createTurnCollector();
-            collectors.set(frame.sessionId, collector);
-            const ended = collector.push(frame.event);
+            // 只在真的收到 turn/start 时才开 collector：压缩检查点（user/message）、
+            // 会话结束种子（session/end-seed）等非回合帧若顺手建了 collector，此后不会有
+            // turn/end 来收尾，collectors 就永远留着 → isConversationBusyV2 恒为真 →
+            // 该会话永久“繁忙”，之后的唤醒只能进 pendingWakeReasons（压缩/重启后必现）。
+            let collector = collectors.get(frame.sessionId);
+            if (!collector && frame.event.type === 'turn/start') {
+              collector = createTurnCollector();
+              collectors.set(frame.sessionId, collector);
+            }
+            const ended = collector ? collector.push(frame.event) : null;
             if (ended) {
               // reserved2 无行动兜底：普通唤醒回合若既没发消息、也没 mark_read / set_wake_config，
               // 则累计 noActionCount；达到阈值后自动重置 WakeConfig，避免 AI 卡死。

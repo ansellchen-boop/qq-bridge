@@ -126,5 +126,19 @@ export function dshToolNameSet(options) {
  */
 export const DANGER_TOOL_RE = /(pwsh|bash|shell|exec|spawn|process|terminal|pty|read|write|edit|file|fs_|glob|grep|patch|str_replace|subagent|agent_|teammate|workflow|ralph|job|skill|present|goal|plan|todo|memory|snapshot|rollback|incident|plugin|cordis|dsh_|dev_|import|install|reload|inject|stage|config|workspace|session|export|office|slash|command|schedule|voice|speech|team|mcp_resource)/;
 
-/** 明确无害、允许出现在仿真会话 schema 里的模型侧工具。 */
-export const SAFE_MODEL_TOOLS = new Set(['ask_user_question', 'todo_write']);
+/**
+ * 明确无害、允许出现在仿真会话 schema 里的模型侧工具。
+ *
+ * 除 DSH 自带的 `ask_user_question` / `todo_write` 外，还包含 ACP（billion-context）
+ * 的 5 个上下文管理工具（2026-10-03 本部署决定放行，理由见
+ * `plugins/qq-agent-presets/qq-tool-restrict.mjs` 的 SAFE_EXACT 注释）：
+ * 它们只对本会话历史做折叠/检索，没有 shell / 文件 / 进程 / 派生 agent 能力。
+ *
+ * ⚠️ 这份名单只影响 `scan-dsh-tool-names.mjs` 的"未覆盖危险名"报告——它静态扫描
+ * `@deepseek-ai/dsh-*` 安装包，抓不到 billion-context 这类**运行时**注册的工具名，
+ * 所以两边要对齐维护（守卫里那份才是真正的边界）。
+ */
+export const SAFE_MODEL_TOOLS = new Set([
+  'ask_user_question', 'todo_write',
+  'compress', 'decompress', 'search_context', 'acp_status', 'acp_cache',
+]);

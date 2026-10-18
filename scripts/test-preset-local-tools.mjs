@@ -68,7 +68,9 @@ const LOCAL_EXECUTION_TOOLS = [
   'send_message', 'interrupt_agent', 'list_agents',
   'workflow', 'ralph',
   'cordis_inspect_list', 'cordis_inspect_query',
-  'dsh_snapshot', 'dsh_rollback', 'incident_resolved',
+  // 本地偏差（2026-10-02，本部署未安装 dsh-plugin-guard）：这三个名字在本机不存在，
+  // 已从守衛名单同步移除，故此处也一并注掉；日后挂上 plugin-guard 需两处一起加回。
+  // 'dsh_snapshot', 'dsh_rollback', 'incident_resolved',
   'job_list', 'job_output', 'job_kill', 'skill', 'present',
   'get_goal', 'create_goal', 'update_goal',
   'dev_mode_set', 'dev_mode_status', 'dev_mode_subagent',
@@ -78,6 +80,9 @@ const LOCAL_EXECUTION_TOOLS = [
   'spawn_teammate', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update',
   'plugin_manager',
   'schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete',
+  // 第三方搜索插件 dsh-free-search（2026-10-03 装入 web profile）注册的全局工具：
+  // 未经 mcp-web-search-safe 加固的任意出网能力，必须与守卫名单同步。
+  'advanced_search', 'platform_search', 'free_search_test', 'multi_search',
 ];
 
 /**
@@ -103,6 +108,39 @@ const EXPECTED_SAFE_PREFIXES = [
   'mcp__snowluma__',
   'mcp__snowluma-host__',
   'mcp__web-search-safe__',
+];
+
+/**
+ * 守卫 SAFE_EXACT 必须放行的"无害模型侧工具"（此处断言，防上游编辑把它删掉）。
+ *
+ * 2026-10-03 起含 ACP（billion-context）的上下文管理工具：它们由宿主的
+ * DSH 原生插件在全局层注册，QQ 会话 schema 里本来就有，属于纯模型侧能力
+ * （折叠/检索本会话历史），放行理由见 `qq-tool-restrict.mjs` 内注释。
+ *
+ * ⚠️ 2026-10-08 起 compress 被收回，落点是下面的 DISABLED_MODEL_TOOLS：
+ * 每次手动 compress 都会改写前綴 ⇒ 紧随其后的步骤整段重读（¥1/M），
+ * 比它省下的 cacheHit（¥0.02/M）贵 50 倍，实测 10-08 五次约 ¥0.15。
+ */
+const SAFE_MODEL_ALLOWED = [
+  'ask_user_question',
+  'todo_write',
+  'decompress',
+  'search_context',
+  'acp_status',
+  'acp_cache',
+];
+
+/**
+ * 被**故意**在执行期拒绝、且拒绝理由必须能把模型引到正路上的工具。
+ *
+ * 与 RESTRICTED_TOOL_NAMES 的区别：这些名字**不进** restrict 的 deny 名单
+ * （它们由 billion-context 在运行期注册，`scan-dsh-tool-names.mjs` 的静态扫描
+ * 对不上账，写进名单会被判成假名），只由 guard 在调用现场挡下并回一句解释。
+ * 这里断言两件事：确实被拒、且理由里带关键字（防退化成一句没有出路的拒绝，
+ * 2026-10-03 实测那种拒绝让模型反复重试，累积 32 次）。
+ */
+const DISABLED_MODEL_TOOLS = [
+  { name: 'compress', reasonIncludes: ['compress 已停用', 'search_context'] },
 ];
 
 function readPreset(id) {
@@ -188,7 +226,7 @@ test('守卫导出的名单与本测试的清单一致（防两份名单各自�
     assert.deepEqual(missing, [],
       `${id}: 守卫导出的名单缺少本地执行工具：${missing.join(', ')}`);
     // 反向：名单里不该混入"允许的无害工具"。
-    for (const allowed of ['ask_user_question', 'todo_write']) {
+    for (const allowed of SAFE_MODEL_ALLOWED) {
       assert.ok(!mod.RESTRICTED_TOOL_NAMES.includes(allowed),
         `${id}: ${allowed} 是无害模型侧工具，不应出现在 restrict 名单里（会与 SAFE_EXACT 自相矛盾）`);
     }
@@ -230,8 +268,22 @@ test('守卫仍放行 QQ MCP 命名空间与无害模型侧工具', async () => 
         `${id}: MCP 前缀 ${prefix} 应放行`,
       );
     }
-    for (const name of ['ask_user_question', 'todo_write']) {
+    for (const name of SAFE_MODEL_ALLOWED) {
       assert.equal(fakeTools._guard({ name }), undefined, `${id}: ${name} 应放行`);
+    }
+    // 故意停用的工具：必须被拒，且理由要能把模型引到替代做法上。
+    for (const { name, reasonIncludes } of DISABLED_MODEL_TOOLS) {
+      const verdict = fakeTools._guard({ name });
+      assert.ok(
+        typeof verdict === 'string' && verdict.length > 0,
+        `${id}: ${name} 是故意停用的工具，必须被拒绝，实际返回 ${JSON.stringify(verdict)}`,
+      );
+      for (const needle of reasonIncludes) {
+        assert.ok(
+          verdict.includes(needle),
+          `${id}: ${name} 的拒绝理由应包含 ${JSON.stringify(needle)}，实际 ${JSON.stringify(verdict)}`,
+        );
+      }
     }
     // 未知工具名必须 fail-closed。
     for (const name of ['', null, undefined, 'mcp__unknown__x', 'totally_new_tool']) {

@@ -10464,7 +10464,7 @@ async function main() {
     return `【你的身份】你在 QQ 上的昵称是${label}${idText}。${callBits}；群名片可能与昵称不同，at/引用段里带${id ? ` ${id} ` : '你的 QQ 号'}就是在叫你。\n\n`;
   }
 
-  function buildWakePromptBodyV2(key, reason) {
+  function buildWakePromptV2(key, reason) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}\n\n${roleHintForMode('v2')}\n\n` : '';
     const identityLine = selfIdentityTextV2();

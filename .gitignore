@@ -72,3 +72,6 @@ audio/
 
 # 腾讯云 TTS 密钥（禁止入库）
 .secrets/
+
+# 2026-10-22: bili-digest 运行缓存（封面/抽帧/元数据）
+digest/

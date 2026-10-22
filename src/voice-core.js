@@ -159,20 +159,23 @@ export async function probeAudio(file, { ffprobePath = 'ffprobe', timeoutMs = 10
   const outFile = path.join(dir, `p-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`);
   const run = () => new Promise((resolve) => {
     let child;
+    let fd = null;
     try {
+      // 说明：ffprobe（4.4 等版本）没有 ffmpeg 的 `-o` 选项，直接把 stdout 接到文件描述符。
+      fd = fs.openSync(outFile, 'w');
       child = spawn(ffprobePath, [
         '-v', 'error',
         '-show_entries', 'format=duration,format_name',
         '-show_entries', 'stream=codec_name,codec_type,sample_rate,channels',
-        '-of', 'json', '-o', outFile, file
-      ], { windowsHide: true, stdio: 'ignore' });
+        '-of', 'json', file
+      ], { windowsHide: true, stdio: ['ignore', fd, 'ignore'] });
     } catch (error) {
       resolve({ code: -1, error: `ffprobe 启动失败：${error?.message ?? error}` });
       return;
     }
     const timer = setTimeout(() => { try { child.kill(); } catch {} resolve({ code: -2, error: 'ffprobe 超时' }); }, timeoutMs);
-    child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, error: `ffprobe 不可用：${e.message}` }); });
-    child.on('close', (code) => { clearTimeout(timer); resolve({ code }); });
+    child.on('error', (e) => { clearTimeout(timer); try { if (fd !== null) fs.closeSync(fd); } catch {} resolve({ code: -1, error: `ffprobe 不可用：${e.message}` }); });
+    child.on('close', (code) => { clearTimeout(timer); try { if (fd !== null) fs.closeSync(fd); } catch {} resolve({ code }); });
   });
 
   try {

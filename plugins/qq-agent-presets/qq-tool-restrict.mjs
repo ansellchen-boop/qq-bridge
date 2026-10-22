@@ -174,6 +174,9 @@ const SAFE_PREFIXES = [
   'mcp__snowluma__',
   'mcp__snowluma-host__',
   'mcp__web-search-safe__',
+  // B 站視頻摘要（qq-bridge-addons，2026-10-22）：只讀，跑本機 yt-dlp 解析公開視頻
+  'mcp__bili-digest__',
+  'mcp__voice-tts__',
 ]
 
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，

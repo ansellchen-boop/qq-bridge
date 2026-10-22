@@ -1825,7 +1825,17 @@ async function main() {
 
     const assertSendAllowed = guard ? captureSendGuard(key) : null;
     const [kind, id] = key.split(':');
-    const recordSegment = { type: 'record', data: { file: sendPath } };
+    // SnowLuma 跑在 Docker 容器里，看不到宿主机路径（会 EACCES）。优先 inline 成 base64://，
+    // 由容器端解码；只有超过 10MB 才退回路径（那种体积需要把目录挂进容器）。
+    let recordSegment = null;
+    try {
+      const st = fs.statSync(sendPath);
+      if (st.size <= 10 * 1024 * 1024) {
+        const b64 = fs.readFileSync(sendPath).toString('base64');
+        recordSegment = { type: 'record', data: { file: `base64://${b64}` } };
+      }
+    } catch { /* 读不到就退回路径 */ }
+    if (!recordSegment) recordSegment = { type: 'record', data: { file: sendPath } };
     let resolveSend;
     let rejectSend;
     const sendPromise = new Promise((resolve, reject) => { resolveSend = resolve; rejectSend = reject; });

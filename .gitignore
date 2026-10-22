@@ -66,3 +66,9 @@ docs/guides/VOICE.md
 # 语音库（用户个人音频素材，config.json 的 socialV2.voice.dir 指向此处）
 audio/
 
+
+# 2026-10-22: B 站 cookies（登入態，禁止入庫）
+.cookies/
+
+# 腾讯云 TTS 密钥（禁止入库）
+.secrets/

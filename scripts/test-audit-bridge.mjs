@@ -179,7 +179,8 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
     assert.equal(call.body.group_id, 456, '语音发给正确群');
     assert.equal(call.body.message.length, 1, '语音只发一个段');
     assert.equal(call.body.message[0].type, 'record', '段类型是 record');
-    assert.equal(call.body.message[0].data.file, path.join(audioDir, 'hello.mp3'), 'record 段指向库内绝对路径');
+    // 本地改动：语音在 Docker 里发，宿主路径不可读 → 改成 base64:// 直传字节（与表情包同一原则）
+    assert.ok(String(call.body.message[0].data.file).startsWith('base64://'), 'record 段以 base64:// 携带音频字节（不再暴露宿主路径）');
     assert.equal(sent.messageId, 9001, '返回网关 message_id');
     assert.equal(sent.readback, null, '显式关掉回读时不调 fetch_ptt_text');
 

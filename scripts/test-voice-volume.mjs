@@ -35,6 +35,20 @@ function run(bin, args, timeoutMs = 60000) {
 const ffmpeg = (args, t) => run(process.env.FFMPEG_PATH || 'ffmpeg', args, t);
 const ffprobe = (args, t) => run(process.env.FFPROBE_PATH || 'ffprobe', args, t);
 
+// 需要读 stdout 的变体（ffprobe 4.4 没有 -o 写文件参数；Linux 上 pipe 可用）
+function runCapture(bin, args, timeoutMs = 60000) {
+  return new Promise((resolve) => {
+    let child;
+    try { child = spawn(bin, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch (e) { resolve({ code: -1, error: e.message, stdout: '' }); return; }
+    let stdout = '';
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    const timer = setTimeout(() => { try { child.kill(); } catch {} resolve({ code: -2, error: 'timeout', stdout }); }, timeoutMs);
+    child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, error: e.message, stdout }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout }); });
+  });
+}
+
 /**
  * 自己算 WAV 的 RMS 电平（dBFS）——不依赖 ffmpeg 的统计输出。
  *
@@ -122,10 +136,9 @@ console.log('## 原样不加处理');
     const louder = await processAudioVolume(src, { volume: 3, tmpDir: tmp });
     ok(louder.converted === true && fs.existsSync(louder.path), 'volume=3 产出新文件', path.basename(louder.path));
     ok(louder.detail.includes('300%'), 'detail 标明 300%', louder.detail);
-    const probeJson = path.join(tmp, 'p.json');
-    const probe = await ffprobe(['-hide_banner', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', '-o', probeJson, '-i', louder.path]);
-    ok(probe.code === 0 && fs.existsSync(probeJson), '处理后的文件能被 ffprobe 正常解析（没写坏）');
-    const dur = probe.code === 0 ? JSON.parse(fs.readFileSync(probeJson, 'utf8')).format?.duration : null;
+    const probe = await runCapture(process.env.FFPROBE_PATH || 'ffprobe', ['-hide_banner', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', '-i', louder.path]);
+    ok(probe.code === 0 && probe.stdout.trim().startsWith('{'), '处理后的文件能被 ffprobe 正常解析（没写坏）', probe.code !== 0 ? String(probe.error || probe.code) : '');
+    const dur = probe.code === 0 ? JSON.parse(probe.stdout).format?.duration : null;
     ok(dur !== null && Math.abs(Number(dur) - 1) < 0.15, '时长保持不变', `${dur}s`);
 
     const quieter = await processAudioVolume(src, { volume: 0.3, tmpDir: tmp });

@@ -228,6 +228,8 @@ const SAFE_PREFIXES = [
   'mcp__web-search-safe__',
   // B 站視頻摘要（qq-bridge-addons，2026-10-22）：只讀，跑本機 yt-dlp 解析公開視頻
   'mcp__bili-digest__',
+  // B站旁挂（2026-10-28）：选题/看视频只读，评论走草稿队列，发出需主人点头
+  'mcp__bili-local__',
   'mcp__voice-tts__',
 ]
 
@@ -287,9 +289,53 @@ const SAFE_EXACT = new Set([
   'compress',
   'decompress',
   'search_context',
-  'acp_status',
-  'acp_cache',
 ])
+
+// 2026-10-24：生图工具不再进 SAFE_EXACT，改为按会话工作区隔离。
+// 用户要求：dsh-imagegen 只给 dsh-im 自己的官方 QQ bot 用，qq-bridge（SnowLuma）不许用。
+// 两个 bot 都跑 qq-chat-v2 preset，唯一可靠的区分是会话的 header.cwd：
+// dsh-im 的会话落在它的工作区（/root/.dsh/integrations/dsh-qq/workspaces.json 里配置，
+// 默认 /root/.dsh/im），桥接会话落在 /root/qq-bridge/state/agents/<sessionId>。
+// 所以这里不写死路径：读 workspaces.json，按 mtime 缓存，任何一个工作区内的会话才放行。
+const DSH_IM_ONLY_TOOLS = new Set([
+  'generate_image',
+  'edit_image',
+  'get_image_generation_task',
+  // dsh-im 的出站附件工具：把生成结果登记到当前回合的 IM 投递队列（桥接会话没有 consumer）
+  'dsh_im_return_file',
+])
+
+const DSH_IM_WORKSPACES_FILE = process.env.QQ_DSH_IM_WORKSPACES
+  || path.join(process.env.HOME || '/root', '.dsh/integrations/dsh-qq/workspaces.json')
+
+let dshImWorkspaceCache = { stamp: -1, roots: [] }
+
+function dshImWorkspaceRoots() {
+  try {
+    const stamp = fs.statSync(DSH_IM_WORKSPACES_FILE).mtimeMs
+    if (dshImWorkspaceCache.stamp === stamp) return dshImWorkspaceCache.roots
+    const parsed = JSON.parse(fs.readFileSync(DSH_IM_WORKSPACES_FILE, 'utf8'))
+    const roots = Object.values(parsed?.workspaces ?? {})
+      .filter((value) => typeof value === 'string' && value.startsWith('/'))
+      .map((value) => path.resolve(value))
+    dshImWorkspaceCache = { stamp, roots }
+    return roots
+  } catch {
+    return dshImWorkspaceCache.roots
+  }
+}
+
+function sessionCwdOf(exec) {
+  const cwd = exec?.agent?.session?.header?.cwd
+  return typeof cwd === 'string' ? cwd : ''
+}
+
+function isDshImSession(exec) {
+  const cwd = sessionCwdOf(exec)
+  if (!cwd) return false
+  const resolved = path.resolve(cwd)
+  return dshImWorkspaceRoots().some((root) => resolved === root || resolved.startsWith(root + path.sep))
+}
 
 // 2026-10-08：曾收回 compress（理由：泛泛一句「不在白名单内」会让模型反复重试）。
 // 2026-10-09：**重新开放**。10-08 19:58 收回后实测：bili 自己不会折叠，它只发 T1 提醒，
@@ -348,7 +394,17 @@ export function apply(ctx) {
   // 因此本名单主要防的是"别的 composition 把它们注册进全局层"这种回归，
   // 以及 MCP 之外的宿主工具（plugin-guard / cordis 检查工具等）。
   const stamp = new Date().toISOString()
-  const failed = []
+  // 两类失败必须分开（2026-10-26 修）：
+  //   absent —— tools.restrict() 报 "unknown global tool"，意思是**这个安装里没有这个工具名**。
+  //             本名单是"防回归"名单，LOCAL_EXECUTION_TOOLS 里绝大多数（pwsh/bash/read/subagent…）
+  //             是各 preset 行自己注册的 scoped 工具，在 QQ preset 里本来就没挂载 ⇒ 不存在是常态。
+  //   broken —— 名字存在但 restrict 没生效，这才是真问题，必须报出来。
+  // 以前把两类混在一条 console.error 里，每次启动刷一条 3KB 的"报错"，79/83 全是常态，
+  // 真正的故障反而淹在里面看不见。
+  const absent = []
+  const broken = []
+  const reasonOf = (error) => String(error?.message ?? error)
+  const isUnknownName = (message) => message.includes('unknown global tool')
   const attempt = (names) => {
     let ok = 0
     for (const name of names) {
@@ -356,38 +412,53 @@ export function apply(ctx) {
         ctx.tools.restrict({ deny: [name] })
         ok += 1
       } catch (error) {
-        failed.push({ name, message: String(error?.message ?? error) })
+        const message = reasonOf(error)
+        if (isUnknownName(message)) absent.push(name)
+        else broken.push({ name, message })
       }
     }
     return ok
   }
 
   const firstOk = attempt(KNOWN_DANGEROUS_GLOBAL_TOOLS)
-  const firstFailed = failed.slice()
-  failed.length = 0
+  const firstAbsent = absent.slice()
+  const firstBroken = broken.slice()
 
-  if (firstFailed.length > 0) {
-    // 逐个名字的报错收成一类，避免 18 行重复
-    const reasons = [...new Set(firstFailed.map((f) => f.message))]
+  console.log(
+    `[qq-tool-restrict] ${stamp} 全局层 restrict：隐藏 ${firstOk} 个 / 本安装不存在 ${firstAbsent.length} 个 / 真失败 ${firstBroken.length} 个`
+  )
+
+  if (firstBroken.length > 0) {
+    const reasons = [...new Set(firstBroken.map((f) => f.message))]
     console.error(
-      `[qq-tool-restrict] restrict 失败 ${firstFailed.length}/${KNOWN_DANGEROUS_GLOBAL_TOOLS.length}：${reasons.join(' | ')}`
+      `[qq-tool-restrict] restrict 真失败 ${firstBroken.length}/${KNOWN_DANGEROUS_GLOBAL_TOOLS.length}：${reasons.join(' | ')}`
     )
     writeDiagnostics([
-      `${stamp} restrict ok=${firstOk} failed=${firstFailed.length} 原因: ${reasons.join(' | ')}`,
-      `${stamp} 失败样例: ${firstFailed.slice(0, 3).map((f) => f.name).join(', ')}`,
+      `${stamp} restrict ok=${firstOk} absent=${firstAbsent.length} broken=${firstBroken.length} 原因: ${reasons.join(' | ')}`,
+      `${stamp} 失败样例: ${firstBroken.slice(0, 3).map((f) => f.name).join(', ')}`,
     ])
-    // 时序兜底：注入器的工具可能在 preset apply 之后才注册进全局层。
-    // 3 秒后重试失败项；成功则记一行，失败保留原因。
+  }
+
+  // 时序兜底：注入器的工具可能在 preset apply 之后才注册进全局层。
+  // 所以重试的是第 1 轮"不存在"的那批（晚注册后会变成存在），且只在**真补到东西**时打日志。
+  if (firstAbsent.length > 0) {
     const timer = setTimeout(() => {
       let ok = 0
-      const still = []
-      for (const { name } of firstFailed) {
-        try { ctx.tools.restrict({ deny: [name] }); ok += 1 } catch (error) { still.push(`${name}: ${error?.message ?? error}`) }
+      const stillAbsent = []
+      for (const name of firstAbsent) {
+        try {
+          ctx.tools.restrict({ deny: [name] })
+          ok += 1
+        } catch (error) {
+          const message = reasonOf(error)
+          if (isUnknownName(message)) stillAbsent.push(name)
+          else writeDiagnostics([`${new Date().toISOString()} 延迟重试真失败 ${name}: ${message}`])
+        }
       }
-      if (ok > 0) console.error(`[qq-tool-restrict] 延迟重试补藏成功 ${ok} 个`)
-      writeDiagnostics([
-        `${new Date().toISOString()} 延迟重试 ok=${ok} 仍失败=${still.length}${still.length ? ` 原因: ${still[0]}` : ''}`,
-      ])
+      if (ok > 0) {
+        console.error(`[qq-tool-restrict] 延迟重试补藏成功 ${ok} 个（晚注册的全局工具）`)
+        writeDiagnostics([`${new Date().toISOString()} 延迟重试 ok=${ok} 仍不存在=${stillAbsent.length}`])
+      }
     }, 3000)
     timer?.unref?.()
   }
@@ -398,6 +469,10 @@ export function apply(ctx) {
     if (typeof name !== 'string' || name.length === 0) return '工具名无效，已拒绝'
     const disabledReason = DISABLED_WITH_REASON.get(name)
     if (disabledReason) return disabledReason
+    if (DSH_IM_ONLY_TOOLS.has(name)) {
+      if (isDshImSession(exec)) return
+      return `工具 "${name}" 只对 dsh-im 官方 QQ bot 会话开放（当前会话工作区：${sessionCwdOf(exec) || '未知'}），已拒绝`
+    }
     if (SAFE_EXACT.has(name)) return
     if (SAFE_PREFIXES.some((prefix) => name.startsWith(prefix))) return
     return `工具 "${name}" 不在 QQ 桥接白名单内，已拒绝（仅允许 QQ MCP 工具与无害模型侧工具）`

@@ -31,6 +31,7 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger } from './token-ledger.js';
+import { buildYesterdayLine } from './yesterday-digest.mjs';
 
 // —— 发送限流提示：告诉调用方还要等多久，而不是只丢一句「请稍后再试」 ——
 function sendRateLimitError(st, sendCfg, needCount, now = Date.now()) {
@@ -2471,6 +2472,9 @@ async function main() {
       const block = buildSlangContext(slangEntries, cfg.slang?.injectMax ?? 8);
       if (block) parts.push(block);
     }
+    // 【你昨晚】B 站夜间活动的一行记忆（读不到/那晚没动静就整段消失，见 yesterday-digest.mjs）
+    const yesterdayLine = buildYesterdayLine();
+    if (yesterdayLine) parts.push(yesterdayLine);
     return parts.join('\n\n') + '\n\n' + promptText;
   }
 

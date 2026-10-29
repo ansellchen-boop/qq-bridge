@@ -51,6 +51,19 @@ export function describeAge(ms, now = Date.now()) {
   return ageText(t, now);
 }
 
+// ── 群友可控文本入模前的结构净化 ─────────────────────────────────────────────
+// QQ 群成员的 sender/text 完全可控，而提示词用【…】标系统段落、换行分隔段落。
+// 不净化时一条群消息就能伪造【系统】/【管理员】段落并脱离原段落（上游 issue #80）。
+// 换行类字符不止 \r\n：U+2028/U+2029 在 JS 里也是行终止符，U+0085/U+000B/U+000C
+// 在多数渲染器里同样断行。零宽字符可把【系统】拆成"看起来正常、匹配不上"的形式。
+export function sanitizeUntrustedText(value) {
+  return String(value ?? '')
+    .replace(/\u3010/g, '[')
+    .replace(/\u3011/g, ']')
+    .replace(/[\r\n\u2028\u2029\u0085\u000b\u000c]+/g, ' ')
+    .replace(/[\u200b-\u200f\u2060\ufeff]/g, '');
+}
+
 function isRecord(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
@@ -84,8 +97,13 @@ function compactMedia(media, canResolveByMessage) {
 }
 
 export function compactModelMessage(message, opts = {}) {
+  if (typeof message === 'string') return sanitizeUntrustedText(message);
   if (!isRecord(message)) return message;
   const result = { ...message };
+  // 群友可控字段先净化。必须在下面的去重之前：否则原文不同、净化后相同的两条会被当成两条。
+  for (const key of ['sender', 'text', 'plain', 'tail']) {
+    if (typeof result[key] === 'string') result[key] = sanitizeUntrustedText(result[key]);
+  }
   // No trimming or truncation: differing plain text can contain resolved quote
   // context, and tail can carry the end of a long message absent from text.
   const seenText = new Set();
@@ -116,6 +134,7 @@ export function compactModelMessage(message, opts = {}) {
 }
 
 export function compactModelData(data, opts = {}) {
+  if (typeof data === 'string') return sanitizeUntrustedText(data);
   if (Array.isArray(data)) return data.map((item) => compactModelData(item, opts));
   if (!isRecord(data)) return data;
   // 一次序列化只取一次 now：同一批消息的 ago 必须彼此可比（否则跨分钟边界会自相矛盾）。

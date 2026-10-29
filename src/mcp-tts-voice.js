@@ -114,8 +114,74 @@ function signedRequest(payload, action) {
   }
 }
 
+// --- Fish Audio 分支 -------------------------------------------------------
+// 直接用平台上公开音色的 reference_id（「蓝色大肥鱼」），一次 JSON 请求即可：
+// 不需要上传参考音频、不需要自建模型、不需要 GPU。
+const FISH_HOST = process.env.FISH_HOST ?? 'https://api.fish.audio'
+const FISH_MODEL = process.env.FISH_MODEL ?? 's2.1-pro-free'
+const FISH_REFERENCE_ID = process.env.FISH_REFERENCE_ID ?? 'fe50cdf3040449298470d58ff0991e1d'
+const FISH_SECRET_FILE = path.join(ROOT, '.secrets', 'fish.json')
+
+function fishCredentials() {
+  const direct = process.env.FISH_API_KEY
+  if (direct) return { apiKey: direct }
+  if (existsSync(FISH_SECRET_FILE)) {
+    const parsed = JSON.parse(readFileSync(FISH_SECRET_FILE, 'utf8'))
+    if (parsed.apiKey) return parsed
+  }
+  throw new Error('缺少 Fish Audio key：写 .secrets/fish.json {"apiKey":"sk-fish-..."} 或设 FISH_API_KEY')
+}
+
+async function synthesizeFish(text, hot = {}) {
+  const { apiKey } = fishCredentials()
+  const fmt = String(hot.FishFormat ?? process.env.FISH_FORMAT ?? 'mp3').toLowerCase().trim()
+  const body = {
+    text,
+    reference_id: String(hot.FishReferenceId ?? FISH_REFERENCE_ID),
+    format: fmt,
+    temperature: Number(hot.FishTemperature ?? 0.7),
+    top_p: Number(hot.FishTopP ?? 0.7),
+    prosody: {
+      speed: Number(hot.Speed ?? 1.0),
+      volume: Number(hot.Volume ?? 0),
+      normalize_loudness: true,
+    },
+    normalize: true,
+    latency: String(hot.FishLatency ?? 'normal'),
+  }
+  if (fmt === 'mp3') body.mp3_bitrate = Number(hot.FishMp3Bitrate ?? 64)
+  else body.sample_rate = Number(hot.FishSampleRate ?? 24000)
+  const fishHost = String(hot.FishHost ?? FISH_HOST)
+  const res = await fetch(fishHost + '/v1/tts', {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer ' + apiKey,
+      'content-type': 'application/json',
+      model: String(hot.FishModel ?? FISH_MODEL),
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(Number(hot.FishTimeoutMs ?? 20_000)),
+  })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error('Fish ' + res.status + ': ' + detail.slice(0, 200))
+  }
+  const audio = Buffer.from(await res.arrayBuffer())
+  if (audio.length < 1000) throw new Error('Fish 返回音频过小（' + audio.length + ' 字节）')
+  const ext = fmt === 'mp3' ? '.mp3' : (fmt === 'opus' ? '.ogg' : '.wav')
+  return { audio, requestId: 'fish:' + (res.headers.get('x-request-id') || 'ok'), ext }
+}
+
 async function synthesize(text) {
   const hot = hotConfig()
+  const provider = String(hot.Provider ?? process.env.TTS_PROVIDER ?? 'tencent').toLowerCase().trim()
+  if (provider === 'fish' || provider === 'fishaudio') {
+    try {
+      return await synthesizeFish(text, hot)
+    } catch (err) {
+      console.error('[qq-voice] Fish 合成失败，回退腾讯云：' + err.message)
+    }
+  }
   const payload = {
     Text: text,
     SessionId: 'qq-bridge-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8),
@@ -127,6 +193,8 @@ async function synthesize(text) {
     Speed: Number(hot.Speed ?? SPEED),
     Volume: Number(hot.Volume ?? VOLUME),
   }
+  const fastVoice = hot.FastVoiceType ?? process.env.TTS_FAST_VOICE_TYPE ?? ''
+  if (fastVoice) payload.FastVoiceType = String(fastVoice)
   const emotion = hot.EmotionCategory ?? EMOTION
   if (emotion) {
     payload.EmotionCategory = emotion
@@ -157,7 +225,7 @@ const server = new McpServer({ name: 'qq-voice', version: '1.1.0' })
 
 server.tool(
   'qq_say_voice',
-  '把一句话用腾讯云 TTS 合成成语音，并以 QQ 语音条发到指定群/私聊。只用于短句（不超过 100 字），适合语气词、吐槽、一句话回应。发送仍然受桥接白名单与限流约束。',
+  '把一句话合成成语音（默认腾讯云 TTS；.secrets/tts.json 里 Provider=fish 时走 Fish Audio 的大肥鱼音色），并以 QQ 语音条发到指定群/私聊。只用于短句（不超过 100 字），适合语气词、吐槽、一句话回应。发送仍然受桥接白名单与限流约束。',
   {
     text: z.string().describe('要说的内容，短句，不超过 100 字'),
     target: z.string().optional().describe('目标，格式 group:群号 或 private:QQ号；省略则发到配置里第一个白名单群'),
@@ -183,14 +251,15 @@ server.tool(
 
     let audio
     let requestId
+    let ext = '.wav'
     try {
-      ({ audio, requestId } = await synthesize(say))
+      ({ audio, requestId, ext = '.wav' } = await synthesize(say))
     } catch (error) {
-      return { content: [{ type: 'text', text: '腾讯云 TTS 合成失败：' + error.message }], isError: true }
+      return { content: [{ type: 'text', text: 'TTS 合成失败：' + error.message }], isError: true }
     }
 
     mkdirSync(GEN_DIR, { recursive: true })
-    const name = createHash('sha1').update(say).digest('hex').slice(0, 12) + '.wav'
+    const name = createHash('sha1').update(say).digest('hex').slice(0, 12) + ext
     const file = path.join(GEN_DIR, name)
     writeFileSync(file, audio)
 

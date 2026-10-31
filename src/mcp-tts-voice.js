@@ -228,7 +228,7 @@ server.tool(
   '把一句话合成成语音（默认腾讯云 TTS；.secrets/tts.json 里 Provider=fish 时走 Fish Audio 的大肥鱼音色），并以 QQ 语音条发到指定群/私聊。只用于短句（不超过 100 字），适合语气词、吐槽、一句话回应。发送仍然受桥接白名单与限流约束。',
   {
     text: z.string().describe('要说的内容，短句，不超过 100 字'),
-    target: z.string().optional().describe('目标，格式 group:群号 或 private:QQ号；省略则发到配置里第一个白名单群'),
+    target: z.string().describe('必填：当前会话的 key，群聊 group:<群号> 或私聊 private:<QQ号>；省略会被拒，不会自动选群'),
   },
   async ({ text, target }) => {
     const say = String(text ?? '').trim()
@@ -244,9 +244,15 @@ server.tool(
 
     let dest = String(target ?? '').trim()
     if (!dest) {
-      const first = (cfg.allow && cfg.allow.groups && cfg.allow.groups[0]) || ''
-      if (!first) return { content: [{ type: 'text', text: '没有指定 target，且白名单为空' }], isError: true }
-      dest = 'group:' + first
+      // 不再回退「第一个白名单群」：私聊里省略 target 会把私聊内容发进群。
+      return {
+        content: [{
+          type: 'text',
+          text: 'target 必填：传当前会话的 key（群聊 group:<群号>、私聊 private:<QQ号>）。'
+            + '这里不再自动选群，避免把私聊内容发进群里。',
+        }],
+        isError: true,
+      }
     }
 
     let audio
@@ -275,11 +281,17 @@ server.tool(
     if (run.status !== 0) {
       return { content: [{ type: 'text', text: '发送失败（exit ' + run.status + '）：\n' + out.slice(-600) }], isError: true }
     }
+    // 落地校验：send-voice.mjs 只有真去 get_msg 读回 record 段时才打这两行之一。
+    const readbackOk = out.includes('已回读校验')
+    const readbackFail = out.includes('未能回读校验')
+    const verified = readbackOk ? true : (readbackFail ? false : null)
     return {
       content: [{
         type: 'text',
         text: '已发送语音到 ' + dest + '：' + say + '\n（' + Math.round(audio.length / 1024) + ' KB，RequestId ' + requestId + '）\n' +
-          out.split(/\r?\n/).filter(l => l.includes('✅') || l.includes('messageId')).join('\n'),
+          // ⚠️ 行必须放行：回读失败以前被这条过滤器吃掉，模型只看得到「✅ 已作为语音发出」
+          out.split(/\r?\n/).filter(l => l.includes('✅') || l.includes('⚠️') || l.includes('messageId')).join('\n') + '\n' +
+          'verified=' + (verified === null ? 'unknown' : String(verified)),
       }],
     }
   },

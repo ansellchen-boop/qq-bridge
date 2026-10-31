@@ -77,7 +77,7 @@ test('social autonomy and visual, forwarding, sticker and web capabilities remai
     'qq_send_poke', 'qq_list_stickers', 'qq_get_sticker_image', 'qq_send_sticker',
     'qq_collect_sticker', 'qq_sticker_note', 'qq_get_self_image',
     'qq_set_sticker_remark', '只有管理端明确开启后才能用',
-    'qq_list_voices', 'qq_send_voice', 'verified=true 才代表这条语音确实落地',
+    'qq_list_voices', 'qq_send_voice', 'target 必填，必须传当前会话的 key', 'verified=false` 表示发出去了但没读回',
     '语音**默认是关闭的**', '不要假装发了语音',
     'mcp__web-search-safe__web_search', 'mcp__web-search-safe__web_fetch',
   ]) assert.ok(prefix.includes(text), `missing capability or voice rule: ${text}`);

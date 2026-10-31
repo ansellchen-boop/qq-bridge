@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -153,7 +154,23 @@ test('MCP validates/forwards read watermarks and wait purposes against an isolat
     // live config or user runtime state are copied into this test fixture.
     fixture = await fs.mkdtemp(path.join(ROOT, '.tmp-model-view-test-'));
     await fs.mkdir(path.join(fixture, 'src'));
-    await Promise.all(['mcp-snowluma-safe.js', 'qq-model-view.js', 'sensitive.js'].map((name) =>
+    // 只复制固定清单不行（2026-10-31 踩到）：mcp-snowluma-safe.js 会 import 本地模块，
+    // 7c71691 新增的 wake-config-alias.js 没进清单 ⇒ 子进程 ERR_MODULE_NOT_FOUND 直接退出
+    // ⇒ 客户端只看到 `MCP error -32000: Connection closed`，完全看不出真正原因。
+    // 改成按 import 图递归复制 ./xxx.js，以后再加本地依赖不用改这份清单。
+    const localImportsOf = (file) => {
+      const src = readFileSync(path.join(ROOT, 'src', file), 'utf8');
+      return [...src.matchAll(/from\s+'\.\/([\w.-]+\.js)'/g)].map((m) => m[1]);
+    };
+    const closure = new Set();
+    const pending = ['mcp-snowluma-safe.js', 'qq-model-view.js', 'sensitive.js'];
+    while (pending.length) {
+      const name = pending.shift();
+      if (closure.has(name)) continue;
+      closure.add(name);
+      pending.push(...localImportsOf(name));
+    }
+    await Promise.all([...closure].map((name) =>
       fs.copyFile(path.join(ROOT, 'src', name), path.join(fixture, 'src', name))));
     await fs.writeFile(path.join(fixture, 'config.json'), JSON.stringify({ consolePort: api.address().port }));
     const transport = new StdioClientTransport({

@@ -180,8 +180,13 @@ console.log('## qq-bridge 语音系统：控制台与 preset');
 
 console.log('## 文档');
 {
-  const voice = read(path.join('docs', 'guides', 'VOICE.md'));
-  for (const needle of ['图形界面', 'voice-gui.mjs', 'voice-cli.mjs', '默认是关的', '发语音-图形界面.cmd']) {
+  // 2026-10-31：docs/guides/VOICE.md 从来没提交过（git log 查不到它），语音用法已经并进
+  // README —— 实测 README 含「图形界面」×4、「发语音-图形界面.cmd」×1、「voice-gui.mjs」×3、
+  // 「voice-cli.mjs」×5、「默认关闭」×1，要点一个不缺。所以不再强制单独文件：
+  // 有就查那份，没有就退回 README，断言同一组关键词。
+  const voicePath = path.join('docs', 'guides', 'VOICE.md');
+  const voice = exists(voicePath) ? read(voicePath) : read('README.md');
+  for (const needle of ['图形界面', 'voice-gui.mjs', 'voice-cli.mjs', '默认关闭', '发语音-图形界面.cmd']) {
     ok(voice.includes(needle), 'docs/guides/VOICE.md 提到「' + needle + '」');
   }
   const readme = read('README.md');

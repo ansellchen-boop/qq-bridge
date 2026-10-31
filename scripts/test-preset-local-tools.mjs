@@ -94,7 +94,16 @@ const LOCAL_EXECUTION_TOOLS = [
 ];
 
 /** 0.2.1 起 Codex / Claude Code 改为按需安装：这组名字默认扫不到，不算拼错假名。 */
-const OPTIONAL_BUNDLE_TOOLS = new Set(['subagent_codex', 'subagent_claude_code']);
+// 2026-10-31 补：advanced_search / platform_search / multi_search 由 profile 依赖
+// `deepseek-search-tools` 注册，free_search_test 由 `dsh-free-search` 注册；两者都装在
+// `<profile>/node_modules` 里，而 collectDshToolNames 只扫 `@deepseek-ai/dsh-*` 包和
+// `~/.dsh/plugins`，够不到 profile 的依赖 ⇒ 四个真名字被当成假名。
+// 已逐个 grep 核实（deepseek-search-tools / dsh-free-search 的 dist 里都有），
+// 按「真实存在但扫描器看不见」并入本集合，语义与 subagent_* 一致。
+const OPTIONAL_BUNDLE_TOOLS = new Set([
+  'subagent_codex', 'subagent_claude_code',
+  'advanced_search', 'platform_search', 'multi_search', 'free_search_test',
+]);
 
 /**
  * 工具名 → 真实存在与否。抽取实现在 `scripts/dsh-tool-names.mjs`（唯一实现，
@@ -150,9 +159,13 @@ const SAFE_MODEL_ALLOWED = [
  * 这里断言两件事：确实被拒、且理由里带关键字（防退化成一句没有出路的拒绝，
  * 2026-10-03 实测那种拒绝让模型反复重试，累积 32 次）。
  */
-const DISABLED_MODEL_TOOLS = [
-  { name: 'compress', reasonIncludes: ['compress 已停用', 'search_context'] },
-];
+// 目前**没有**故意停用的模型侧工具。
+// 唯一一条 compress 已于 2026-10-09 加回 SAFE_EXACT（当天凌晨实测：关掉后 bili 的折叠
+// 完全停摆 —— bili 只发提醒，动手的是模型的 compress 呼叫，11 次全被拒、fold 0 笔），
+// 2026-10-08 那条「收回 compress」的结论已被推翻，但这条断言没跟着改，一直红着。
+// 表结构留着：日后真要停用某个工具，往这里加 { name, reasonIncludes }，
+// 再把它从 qq-tool-restrict.mjs 的 SAFE_EXACT 挪进 DISABLED_WITH_REASON。
+const DISABLED_MODEL_TOOLS = [];
 
 function readPreset(id) {
   const dir = path.join(PRESETS_DIR, id);

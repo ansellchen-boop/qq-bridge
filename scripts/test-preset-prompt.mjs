@@ -133,21 +133,35 @@ test('删掉安全不变量或正文过短时阻断保存（保护 AI 效果与�
 });
 
 test('写回沿用文件主导行尾，且不吞掉块尾空行', () => {
-  const next = renderPresetPromptYaml(source, originalPrefix);
-  const crlf = (next.match(/\r\n/g) ?? []).length;
-  const lfOnly = (next.match(/\n/g) ?? []).length - crlf;
-  assert.ok(crlf > 0, 'CRLF 文件写回后应仍使用 CRLF');
-  assert.equal(lfOnly, 0, '写回后不应残留/新增 LF-only 行');
-  assert.ok(next.includes('prefix: |-\r\n'), '新增行应使用 CRLF');
-  // 块之后的内容（空行、注释、后续条目）必须逐字保留
-  const before = locatePresetPromptBlock(source);
-  const after = locatePresetPromptBlock(next);
-  assert.deepEqual(
-    next.split('\n').slice(after.blockEnd),
-    source.split('\n').slice(before.blockEnd),
-    'prefix 块之后的内容应逐字不变（含块尾空行与注释）',
-  );
-  assert.ok(source.split('\n').slice(before.blockEnd).some((l) => l.trim() === ''), '样本应确实包含块尾空行，否则该断言无意义');
+  // 2026-10-31：这条原先直接拿仓库里的 agent.cordis.yml 当样本，并断言「写回后仍有 CRLF」——
+  // 但仓库里那份是 LF（HEAD 版 CR 数 = 0，工作区同样），于是它在 LF 检出下必然红，
+  // 而它想测的能力（沿用文件主导行尾）本来就是平台无关的。
+  // 改成用同一份内容自造 CRLF / LF 两种样本，各验一遍。
+  const crlfSource = source.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+  for (const [label, src, wantCrlf] of [['CRLF', crlfSource, true], ['LF', source, false]]) {
+    const prefix = extractPresetPrefix(src);
+    const next = renderPresetPromptYaml(src, prefix);
+    const crlf = (next.match(/\r\n/g) ?? []).length;
+    const lfOnly = (next.match(/\n/g) ?? []).length - crlf;
+    if (wantCrlf) {
+      assert.ok(crlf > 0, `${label} 文件写回后应仍使用 CRLF`);
+      assert.equal(lfOnly, 0, `${label} 写回后不应残留/新增 LF-only 行`);
+      assert.ok(next.includes('prefix: |-\r\n'), `${label} 新增行应使用 CRLF`);
+    } else {
+      assert.equal(crlf, 0, `${label} 文件写回后不应凭空出现 CRLF`);
+      assert.ok(lfOnly > 0, `${label} 文件写回后应仍是 LF`);
+    }
+    // 块之后的内容（空行、注释、后续条目）必须逐字保留
+    const before = locatePresetPromptBlock(src);
+    const after = locatePresetPromptBlock(next);
+    assert.deepEqual(
+      next.split('\n').slice(after.blockEnd),
+      src.split('\n').slice(before.blockEnd),
+      `${label} prefix 块之后的内容应逐字不变（含块尾空行与注释）`,
+    );
+    assert.ok(src.split('\n').slice(before.blockEnd).some((l) => l.trim() === ''),
+      `${label} 样本应确实包含块尾空行，否则该断言无意义`);
+  }
 });
 
 test('只含空格/Tab 的行也能安全往返（不会被当成空行读丢）', () => {

@@ -15,11 +15,16 @@ for (const preset of ['qq-chat', 'qq-chat-v2']) {
   } });
   assert.equal(typeof guard, 'function');
   assert.ok(restricted.includes('dev_install_package'));
+  // 裸名 web_search / web_fetch 自 2026-10-17 起就在 SAFE_EXACT 里（切到
+  // deepseek-search-tools provider，只读、无执行面，理由见 qq-tool-restrict.mjs 的
+  // SAFE_EXACT 段）。这条断言原先按老口径要求「必须拒绝」，与实现相反 ——
+  // 2026-10-31 改成「必须放行」，否则测试红着而实现是对的。
   for (const name of ['ask_user_question', 'todo_write', 'mcp__snowluma__qq_send_message',
-    'mcp__snowluma-host__snowluma_status', 'mcp__web-search-safe__web_fetch']) {
+    'mcp__snowluma-host__snowluma_status', 'mcp__web-search-safe__web_fetch',
+    'web_search', 'web_fetch']) {
     assert.equal(guard({ name }), undefined, `${preset}: expected allowed ${name}`);
   }
-  for (const name of ['web_fetch', 'web_search', 'bash', 'read_file', 'dev_future_tool',
+  for (const name of ['bash', 'read_file', 'dev_future_tool',
     'mcp__untrusted__web_fetch', '', null, undefined]) {
     try { assert.equal(typeof guard({ name }), 'string', `${preset}: must reject ${String(name)}`); }
     catch (error) { failures++; console.error(`FAIL ${error.message}`); }

@@ -22,6 +22,7 @@ import * as voiceLib from '../src/send-voice-lib.js';
 import * as presetPrompt from '../src/preset-prompt.js';
 import * as stateAcl from '../src/state-acl.mjs';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
+import * as wakeAlias from '../src/wake-config-alias.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 export async function bridgeHarness({ config = {}, savedState, files = {}, globals = {} } = {}) {
@@ -188,6 +189,14 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt,
+    // wake-config-alias（2026-10-31 补，第 2 次踩同一个坑）：bridge.js:23
+    // `import { splitKeywordString } from './wake-config-alias.js'`，7c71691 加的。
+    // harness 剥掉顶层 import 后 VM 里没有这个绑定 → 任何走 qq_set_wake_config 的路由
+    // 都 500 `splitKeywordString is not defined`（test-token-economy 十个用例全红，
+    // 但 HTTP 层只看到一个裸 500，完全看不出根因）。
+    // 这个模块是纯字符串/常量处理、无 IO，所以真 import 而不是桩：关键词切分的行为
+    // 本身就是被测对象。
+    ...wakeAlias,
     // 桥接的出图出口会调归一化（体积/动图抽帧）：VM 里必须能拿到这几个函数。
     normalizeImageForModel: mediaNormalize.normalizeImageForModel,
     sniffImage: mediaNormalize.sniffImage,
@@ -213,6 +222,14 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
       };
     },
     cleanupTemp: () => {},
+    // yesterday-digest（2026-10-31 补）：bridge.js 顶层 import 了 buildYesterdayLine /
+    // buildDigestPostHint，harness 把顶层 import 全剥掉后必须提供同名绑定，否则 vm 里
+    // `ReferenceError: buildYesterdayLine is not defined`（test-audit-bridge 全线红，
+    // 与 scripts/audit-bridge-harness.mjs 手工列导出名是同一类坑）。
+    // 这里桩成空串而不是 import 真实模块：audit 不该读宿主机
+    // ~/.dsh/surfcore/bili/night-digest.json，否则同一份代码在不同机器上 prompt 长度不同。
+    buildYesterdayLine: () => '',
+    buildDigestPostHint: () => '',
     ...globals,
   });
   // Execute the pure model view in the bridge realm. Its plain-object checks

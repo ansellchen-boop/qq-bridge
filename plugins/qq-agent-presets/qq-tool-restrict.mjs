@@ -289,6 +289,12 @@ const SAFE_EXACT = new Set([
   'compress',
   'decompress',
   'search_context',
+  // 2026-10-31 补回：上面 239-241 行的说明与 test-preset-local-tools.mjs 的
+  // SAFE_MODEL_ALLOWED 都写着「decompress / search_context / acp_status / acp_cache
+  // 继续放行」，但代码里只落了前三个 —— acp_status / acp_cache 被静默漏掉，
+  // 模型调它们会吃一句「不在白名单内，已拒绝」，白费一轮。此处补齐，与注释和测试对齐。
+  'acp_status',
+  'acp_cache',
 ])
 
 // 2026-10-24：生图工具不再进 SAFE_EXACT，改为按会话工作区隔离。

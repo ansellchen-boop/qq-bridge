@@ -44,6 +44,11 @@ console.log('## chcp 可用性');
     // 受限沙箱（DSH workspace-write / 只读）不允许 spawn 捕获输出的子进程。
     // 这是环境限制，不是被测代码的问题 —— 跳过而不是判失败。
     console.log(`  ⏭  跳过：本环境不允许 spawn 子进程（${r.error.code}）；在普通终端里重跑即可验证`);
+  } else if (r.error?.code === 'ENOENT') {
+    // chcp 是 Windows 控制台命令；Linux / macOS 上根本没有这个可执行文件。
+    // 那段乱码机制（字节级往返）在上面的断言里已经验证过了，这里只是「fix 手段可用性」，
+    // 在非 Windows 上没法验 —— 跳过而不是判失败。
+    console.log('  ⏭  跳过：chcp 不存在（非 Windows 平台）；乱码机制本身已在上方字节级验证');
   } else {
     ok(!r.error, 'chcp 命令可执行', r.error ? r.error.message : '');
     const before = spawnSync('chcp', [], { encoding: 'latin1', windowsHide: true });

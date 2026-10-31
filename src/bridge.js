@@ -31,7 +31,7 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger } from './token-ledger.js';
-import { buildYesterdayLine } from './yesterday-digest.mjs';
+import { buildYesterdayLine, buildDigestPostHint } from './yesterday-digest.mjs';
 
 // —— 发送限流提示：告诉调用方还要等多久，而不是只丢一句「请稍后再试」 ——
 function sendRateLimitError(st, sendCfg, needCount, now = Date.now()) {
@@ -8525,9 +8525,13 @@ async function main() {
     // 保留原防护：回复完却没有新消息可看时，仍然必须等满观察窗口或等到新消息。
     // 只看“最后一次发言之后有没有看过新消息”，不要求“追平最新一条”：
     // 活跃群里十几秒就来一条新消息，要求 seenSeq >= lastUnreadSeq 等于永远不放行（原 5 分钟静默窗口的死循环升级版）。
+    // 必须真的发过言（lastAiReplyAt > 0）才适用：从没开口过的会话走到这里时 lastAiReplyAt 是 0，
+    // 原来的 `(||0) <= lastNewMsgSeenAt` 恒真，等于「看一眼看板就能直接沉睡」，把观察窗整个绕过
+    // （test-token-economy「combined close cannot bypass the pre-sleep observation guard」就是这条）。
     if (Number(st.lastNewMsgSeenSeq) > 0
       && Number(st.lastNewMsgSeenAt) > 0
-      && (Number(st.lastAiReplyAt) || 0) <= Number(st.lastNewMsgSeenAt)) {
+      && Number(st.lastAiReplyAt) > 0
+      && Number(st.lastAiReplyAt) <= Number(st.lastNewMsgSeenAt)) {
       log(`[reserved2] 沉睡前观察放行（看过新消息：水位 ${st.lastNewMsgSeenSeq}，当前最新未读 ${st.lastUnreadSeq}，之后没再发言）`);
       return false;
     }
@@ -9444,10 +9448,13 @@ async function main() {
             }
             if (now >= st.proactiveNextCheckAt) {
               st.proactiveNextCheckAt = now + randInt(Number(cfg.social?.proactiveCheckMinMs ?? 2700000), Number(cfg.social?.proactiveCheckMaxMs ?? 5400000));
-              if (Math.random() < Number(cfg.social?.proactiveProbability ?? 0.2)) {
+              // 3.2.3：昨晚的骰子先掷（内部一晚只掷一次）。它不占 proactiveProbability
+              // 那 0.1 的名额——否则实际频率是 0.1x0.4=0.04，跟「十晚四次」差一个量级。
+              const digestHint = buildDigestPostHint(key);
+              if (digestHint || Math.random() < Number(cfg.social?.proactiveProbability ?? 0.2)) {
                 enterActive(key);
                 const roleHint = currentRoleHint();
-                const promptText = buildProactivePrompt(key, roleHint);
+                const promptText = buildProactivePrompt(key, roleHint) + digestHint;
                 scheduleSocialReply(
                   key, promptText,
                   Number(cfg.social?.activeReplyDelayMinMs ?? 2000),
@@ -9710,22 +9717,23 @@ async function main() {
   }
 
   // 检测二代发送内容里“分条断点不自然”的情况：某条消息以逗号/顿号等非终止标点结尾，
-  // 或以“的/了/吗/呢/吧/是/在/把/被/让/给”等通常需要接后续成分的词结尾，下一条又紧跟中文内容，
+  // 或以“因为/所以/但是”等连接词结尾（话明显没说完），下一条又紧跟中文内容，
   // 说明 AI 很可能把同一句话拆到了两条消息里。这里只做软提醒，不拦截、不改写。
   function findSplitBoundaryWarning(messages) {
     if (!Array.isArray(messages) || messages.length <= 1) return null;
-    const INCOMPLETE_TAIL_RE = /(?:的|了|吗|呢|吧|啊|呀|嘛|是|在|把|被|让|给|从|对|向|和|与|或|而|但|然|就|都|还|又|也|很|太|最|更|不|没|有|这|那|哪|啥|什么|怎么|为什么|因为|所以|但是|然后|我|你|他|她|它)$/;
-    // 这些是常见“短句但完整”的结尾，不应因为以“的/了”等结尾就被当成半句话。
-    const COMPLETE_SHORT = new Set(['好的', '行了', '算了', '知道了', '可以了', '没事了', '走了', '睡了', '来了', '懂了', '明白了', '抱歉', '没事', '好吧', '行吧', '算了吧', '好', '行', '嗯', '哦']);
+    // 只认一个可靠信号：上一条以纯连接词结尾（说明话确实还没说完）。
+    // 旧版把「的/了/吗/呢/吧/啊/呀/嘛」也算半句标志，可这些在中文口语里正是完整句末，
+    // 于是「我是 DeepSeek 呀」「张嘴就露馅了」这类完整句被误判成拆开的半句。
+    const CONNECTIVE_TAIL_RE = /(?:因为|所以|但是|然后|而且|或者|不过|可是|如果|虽然|不但|并且|于是|因此|否则|万一)$/;
     const bad = [];
     for (let i = 0; i < messages.length - 1; i++) {
       const prev = String(messages[i] ?? '').trim();
       const next = String(messages[i + 1] ?? '').trim();
-      if (!prev || !next || COMPLETE_SHORT.has(prev)) continue;
+      if (!prev || !next) continue;
       const nextStartsCjk = isCjkLikeChar(Array.from(next)[0]);
       const nonTerminalPunct = /[,，、；;:：]$/.test(prev);
-      const incompleteTail = nextStartsCjk && prev.length >= 3 && INCOMPLETE_TAIL_RE.test(prev);
-      if (nonTerminalPunct || incompleteTail) {
+      const connectiveTail = nextStartsCjk && CONNECTIVE_TAIL_RE.test(prev);
+      if (nonTerminalPunct || connectiveTail) {
         bad.push(`${i + 1}、${i + 2}`);
       }
     }

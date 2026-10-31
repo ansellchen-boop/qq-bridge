@@ -1,0 +1,86 @@
+#!/bin/bash
+# git pre-commit：语法检查 + 提醒写 notes + AGENTS.md 字符数守卫。
+#
+# 安装（一次）：
+#     ln -sf ../../scripts/hooks/pre-commit .git/hooks/pre-commit
+#   ⚠️ 每台机器都要单独装。2026-10-31 发现本地装了、远端 /root/qq-bridge 没装，
+#   而跑测试和部署都在远端 —— 钩子装在不干活的那份上等于没装。
+#
+# 跳过：git commit --no-verify
+#
+# 为什么有这个东西：2026-10-30 那轮重构 + 归档 + 重启，改了 24 个文件却一篇 notes
+# 都没写（AGENTS.md §13 要求写），是独立复核替人抓到的；`node --check` 也一直靠自觉跑。
+# 这个 hook 只做三件便宜、确定的事，不替人做判断。
+
+set -uo pipefail
+
+staged=$(git -c core.quotepath=false diff --cached --name-only --diff-filter=ACM)
+[ -z "$staged" ] && exit 0
+
+# 0) 找 node。git / ssh 调起的 shell 不加载 nvm（AGENTS.md §7 记过），
+#    `node` 直接不在 PATH 里 —— 2026-10-31 远端的钩子就因为这句把每次提交都误判成
+#    「语法检查失败」。环境问题绝不能阻断提交：找不到 node 就跳过并明说。
+NODE=""
+if command -v node >/dev/null 2>&1; then
+  NODE=$(command -v node)
+else
+  for base in "$HOME/.nvm/versions/node" /root/.nvm/versions/node /usr/local/nvm/versions/node; do
+    cand=$(ls -1d "$base"/*/bin/node 2>/dev/null | sort -V | tail -1)
+    if [ -n "$cand" ] && [ -x "$cand" ]; then NODE="$cand"; break; fi
+  done
+  [ -z "$NODE" ] && [ -x /usr/local/bin/node ] && NODE=/usr/local/bin/node
+  [ -z "$NODE" ] && [ -x /usr/bin/node ] && NODE=/usr/bin/node
+fi
+if [ -z "$NODE" ]; then
+  echo "⚠️  找不到 node，跳过 .js/.mjs 语法检查（其余检查照常）。"
+fi
+
+# 1) staged 里的 .js / .mjs 逐个语法检查（阻断）
+failed=0
+while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  [ -z "$NODE" ] && break
+  if ! "$NODE" --check "$f" >/dev/null 2>&1; then
+    echo "✗ 语法检查失败：$f"
+    "$NODE" --check "$f" 2>&1 | head -5 | sed 's/^/    /'
+    failed=1
+  fi
+done < <(printf '%s\n' "$staged" | grep -E '\.(m?js)$' || true)
+
+# 2) AGENTS.md 字符数（阻断）—— Hermes 的 context_file_max_chars 默认 20000，超了
+#    头尾截断丢中段，而且不报错：规矩悄悄消失比报错更糟。2026-10-31 就是涨到 19975
+#    才发现，只能紧急把 §10 前 24 条搬进 notes/。
+#    本仓库的 AGENTS.md 走 git（阻断）；上层 /home/ubuntu/AGENTS.md 不在仓库里，只警告。
+if [ -f AGENTS.md ]; then
+  chars=$(wc -m < AGENTS.md | tr -d ' ')
+  if [ "$chars" -gt 19500 ]; then
+    echo "✗ AGENTS.md 已经 $chars 字符（Hermes 上限 20000，超了会头尾截断丢中段）"
+    echo "    把最长的坑表/清单整段搬进 notes/ 子文档，正文只留一行指针。"
+    failed=1
+  elif [ "$chars" -gt 18000 ]; then
+    echo "⚠️  AGENTS.md 已经 $chars 字符（上限 20000），建议先把长表搬进 notes/。"
+  fi
+fi
+if [ -f ../AGENTS.md ]; then
+  up=$(wc -m < ../AGENTS.md | tr -d ' ')
+  [ "$up" -gt 18000 ] && echo "⚠️  上层 ../AGENTS.md 已经 $up 字符（上限 20000）。"
+fi
+
+if [ "$failed" -ne 0 ]; then
+  echo
+  echo "提交中止。修好上面这些再 commit（确实要跳过：git commit --no-verify）。"
+  exit 1
+fi
+
+# 3) 改了源码/脚本/测试却没写今天的 notes（只警告，不阻断）
+if printf '%s\n' "$staged" | grep -qE '^(bridge-src|scripts|tests|bili-whale)/'; then
+  today=$(date +%Y-%m-%d)
+  if ! printf '%s\n' "$staged" | grep -q "^notes/${today}-"; then
+    echo "⚠️  改了源码/脚本/测试，但这批里没有 notes/${today}-*.md"
+    echo "    AGENTS.md §13：每次做完一件实事记一笔（做了什么、验证命令与输出、遗留）。"
+    echo "    不需要记的（纯格式、纯文档）直接忽略这条；要跳过警告用 git commit --no-verify。"
+    echo
+  fi
+fi
+
+exit 0

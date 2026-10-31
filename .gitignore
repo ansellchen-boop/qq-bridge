@@ -76,3 +76,9 @@ audio/
 # 2026-10-22: bili-digest 运行缓存（封面/抽帧/元数据）
 digest/
 roles/_archive/
+
+# 临时探针与备份（2026-10-31：这批曾被误提交进树，rm --cached 移出）
+*.tmp.mjs
+*.tmp.js
+*.tmp.md
+*.bak[0-9]-*

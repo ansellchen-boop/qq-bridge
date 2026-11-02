@@ -233,10 +233,10 @@ const SAFE_PREFIXES = [
   // B站旁挂（2026-10-28）：选题/看视频只读，评论走草稿队列，发出需主人点头
   'mcp__bili-local__',
   'mcp__voice-tts__',
-  // qq-memory：跨会话记忆外挂，代码与数据都在 /root/qq-memory，
+  // qq-bridge-memory：跨会话记忆外挂，代码与数据都在 /root/qq-bridge-memory，
   // 只读 messages.db（历史聊天原文），没有 shell / 文件写 / 派生 agent 能力。
-  // 工具名见 /root/qq-memory/src/mcp-server.mjs；接线由 apply.py 维护。
-  'mcp__qq-memory__',
+  // 工具名见 /root/qq-bridge-memory/src/mcp-server.mjs；接线由 apply.py 维护。
+  'mcp__qq-bridge-memory__',
 ]
 
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，

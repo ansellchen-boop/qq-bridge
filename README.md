@@ -1,6 +1,6 @@
-# QQ ↔ DeepSeek Harness 桥接
+# qq-bridge
 
-**English**: [README.en.md](README.en.md) | **中文**: [README.md](README.md)
+[English](README.en.md) · [安装指南](docs/guides/DSH_SETUP.md) · [问题反馈](https://github.com/Derpyu520/qq-bridge/issues)
 
 > 🗂️ 文档索引（全部文档一句话说明 + 是否仍然有效）见 **[docs/README.md](docs/README.md)**；仓库目录/脚本命名约定见 **[docs/FOLDER_MAP.md](docs/FOLDER_MAP.md)**。
 >
@@ -9,6 +9,17 @@
 > 🎤 独立的「发语音」工具已拆到仓库上一级的 **`../voice-tool/`**（命令行 `voice-cli.mjs` / 图形界面 `voice-gui.mjs`），不再依赖 qq-bridge 运行。
 
 把 QQ 消息接入 DSH agent：QQ 好友/群发来的消息会变成 DSH 会话里的用户消息，agent 的回复（含提问、工具审批）会发回 QQ。
+
+qq-bridge 是一个本地消息桥接工具，在 SnowLuma 提供的 **OneBot v11 接口**与 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 之间转发消息事件和 AI 回复。
+
+> [!IMPORTANT]
+> **qq-bridge 是独立维护的第三方工具，不是 SnowLuma 的子项目，也不隶属于 SnowLuma、DeepSeek 或腾讯 / QQ。**
+> 本项目通过 SnowLuma 提供的 **OneBot v11 接口**互通；桥接与 SnowLuma 后端分别部署、独立维护，无隶属、合作或背书关系。OneBot v11 是公开协议，并非 SnowLuma 专有协议。
+
+```text
+QQ ↔ SnowLuma ↔ qq-bridge ↔ DeepSeek Harness (127.0.0.1:3080/api) ↔ 模型服务
+             OneBot v11
+```
 
 > ⚠️ **当前版本 `v0.2.1-r1`，适配 DSH 0.2.1-rc.2**（0.2.0-rc.2 亦兼容；两个版本上都逐项实测：`npm run verify:adaptation`）。
 > 鉴权用 `~/.dsh` 里持久化的浏览器会话签名密钥**离线铸造 Cookie** —— DSH 0.1.7 起进程启动 token
@@ -45,17 +56,72 @@
 >
 > 默认分支 `main` **就是**本版本，`git clone` 直接拿到，无需切换分支。
 
-```
-QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──► DSH Web API (127.0.0.1:3080/api)
-                                                ▲                      │
-                                                └── agent 回复/提问/审批 ┘
-```
+## 能做什么
+
+| 场景 | 功能 |
+| --- | --- |
+| 消息桥接 | 按群聊 / 私聊维护独立会话，支持文本、图片、表情与引用回复 |
+| 聊天与仿真 | 普通聊天（`chat`）、两代群友仿真（`reserved` / `reserved2`）、自定义角色 |
+| 个人助手 | `closed-agent` 仅限管理员私聊，可使用完整 DSH 工具；请谨慎开启 |
+| 本地管理 | 控制台切换模式、管理白名单与审批、查看日志和模型用量 |
 
 ## 项目展示
 
 📽️ [AI 仿真群友 - 项目介绍视频](https://github.com/Derpyu520/qq-bridge/releases/download/v0.1.5/project-intro.mp4)（约 11 MB）
 
 > 视频改由 **Release 附件**托管，不在仓库里——只想安装桥接的人不必再下载这 11 MB（它此前占整个仓库体积的 88%）。
+
+## 快速开始
+
+准备好 **Windows 10 / 11、Node.js ≥ 22.13**，以及以下两个独立运行的服务：
+
+- **DSH Web**：当前有 `0.2.0-rc.2` / `0.2.1-rc.2` 的验证记录，其他版本见[兼容范围](docs/guides/DSH_SETUP.md#兼容范围)。
+- **SnowLuma**：请自行按[上游文档](https://github.com/SnowLuma/SnowLuma)安装、启动并登录，开启 OneBot **WebSocket 服务端**和 **HTTP API**。
+
+### 1. 获取项目
+
+在 PowerShell 中运行：
+
+```powershell
+git clone https://github.com/ansellchen-boop/qq-bridge.git
+cd qq-bridge
+npm install
+Copy-Item config.example.json config.json
+```
+
+默认分支 `main` 为正式发布线；`dev` 用于开发与测试。
+
+### 2. 填写配置
+
+编辑 `config.json`，至少核对这些字段：
+
+| 字段 | 填写内容 |
+| --- | --- |
+| `dsh.baseUrl` | DSH Web 地址，默认 `http://127.0.0.1:3080`；模型选择需与 DSH 中可用的配置一致 |
+| `snowluma.wsUrl` / `httpUrl` | OneBot WebSocket / HTTP 地址，示例分别为 `ws://127.0.0.1:3001` / `http://127.0.0.1:3000`，不要混用端口 |
+| `snowluma.accessToken` / `homeDir` | 按实际配置填写令牌与 SnowLuma 安装目录；HTTP、WS 令牌不同时，需能从该目录发现各自令牌 |
+| `ownerQQ` | 你的管理员 QQ 号 |
+| `allow.private` / `allow.groups` | 允许接入的 QQ 号 / 群号；默认空白名单不响应任何会话 |
+
+同机运行时，`dsh.authToken` 通常留空，由桥接使用本机 DSH 凭据完成鉴权。完整配置与连接排查见[安装指南](docs/guides/DSH_SETUP.md)。
+
+### 3. 安装 DSH 插件
+
+```powershell
+node scripts/setup-dsh.mjs
+```
+
+这一步会把聊天预设和 MCP 工具接入 DSH，**首次安装也必须执行**。完成后重启 DSH；使用非 `web` profile 时见[安装指南](docs/guides/DSH_SETUP.md#安装步骤)。
+
+### 4. 启动并测试
+
+```powershell
+npm start
+```
+
+打开 [本地控制台](http://127.0.0.1:3100)，用启动日志中的令牌登录；自动生成的令牌保存在 `state/console-token`。新装默认使用二代仿真模式（`reserved2`），会选择性发言；测试收发时可先切到 `chat`，再从白名单会话发送消息。
+
+Windows 也可双击 `start.bat` 以守护模式运行，关闭窗口即停止。
 
 ## 架构
 
@@ -72,7 +138,7 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
     **搜索优先复用 DSH 原本的联网搜索**（同一个 DeepSeek Anthropic 兼容端点 + `web_search` 服务端工具，凭据按 `config.webSearch.apiKey` → 环境变量 `DEEPSEEK_API_KEY` → DSH 的 `.credentials.yaml` 顺序解析），
     因而结果质量与 DSH 内的搜索一致、且**不再默认把群聊关键词发给 Bing**（Bing RSS 只在 DeepSeek 不可用时兜底）。
     抓取仍由桥接自己做 SSRF 校验并限制正文大小；**黑话学习默认开启**，会把群聊里提取的词条交给所选的搜索后端。
-    数据出机清单见 [LICENSE](LICENSE) 的「数据出机清单」，不需要就关掉黑话自动研究（`slang.autoResearch`）或把 `webSearch.provider` 设为 `bing`。
+    数据出机清单见 [NOTICE](NOTICE.md#四数据传输) 的「数据传输」，不需要就关掉黑话自动研究（`slang.autoResearch`）或把 `webSearch.provider` 设为 `bing`。
 - **会话模型**：每个 QQ 会话（私聊/群）对应一个独立的 DSH 会话，统一归组到「QQ 聊天」工作区（不再散落未分组）；映射持久化在 `state/sessions.json`
 - **性格定制**：QQ 会话默认使用 `qq-chat` agent preset，`reserved2` 使用 `qq-chat-v2`。DSH 0.1.7 起 preset 不再是 `~/.dsh/.agent-presets/<名>/` 目录，而是 `plugins/qq-agent-presets/` bundle 生成并插入 profile 的一条 `@deepseek-ai/dsh-agent-preset` 行（重启 DSH 后生效）；人格与默认 DSH 一致（coding agent），仅附加 QQ 场景规则；**角色扮演**是可选机制——由控制台或管理端设置 `state/current-role.json` 注入（群友无法更改）
 - **本地控制台**：桥接自带 Web 控制台 `http://127.0.0.1:3100`——左侧按操作任务分为「运行总览 / 会话与审批 / 人格与角色 / 二代仿真 / 一代仿真 / 黑话词库 / 令牌与花费 / 访问与安全 / 调试与运维 / 工具参考」十个页面，右上角搜索框可跨页定位任意功能项；支持**浅色 / 深色双主题**（顶栏一键切换，未选择时跟随系统）；切换运行模式（chat / closed-agent / reserved / reserved2）、设置角色、静默开关、查看活动日志、修改管理员/控制台令牌，全部即时生效；访问需要令牌（`config.json` 的 `consoleToken`，未配置时自动生成并打印在启动日志；控制台内可手动修改或重新生成）
@@ -155,7 +221,7 @@ node scripts/setup-dsh.mjs
 
 详细步骤见 **[docs/guides/DSH_SETUP.md](docs/guides/DSH_SETUP.md)**。
 
-## 完整启动流程（从零开始）
+## 完整启动流程
 
 共 6 步。DSH 已安装并运行，缺的是 SnowLuma 本体 + 桥接侧的 DSH 端安装（**第 2、3 步最容易漏，漏了 QQ 上会毫无反应**）：
 
@@ -227,7 +293,7 @@ npm start          # 或双击 start.bat（守护模式：崩溃自动重启，�
 12:00:20 [bridge] agent 回复 (private:12345678) 42 字
 ```
 
-## 自测（不需要 SnowLuma / QQ）
+## 自测
 
 离线回归（使用临时目录和模拟服务，不读取真实配置、不发 QQ 消息）：
 
@@ -293,7 +359,7 @@ qq-bridge/
 > node voice-gui.mjs            # 图形界面（本地小服务 + 浏览器 UI）
 > ```
 
-## SnowLuma 版本与上游健康（「连上了但收不到消息」）
+## SnowLuma 版本与上游健康
 
 「注入」在这个技术栈里只发生在一处：**SnowLuma 用原生组件挂进 QQ 客户端进程**（它自己日志里叫
 `[Hook]`，载体是安装目录的 `native/snowluma-win32-x64.{dll,node}`）。**本桥接没有任何原生/注入面**
@@ -363,6 +429,29 @@ SnowLuma 同一个账号的 **HTTP token（默认 3000 端口）与 WebSocket to
 - agent 的 Markdown 回复会转成纯文本（链接保留 `文字 (url)` 形式）
 - `@snowluma/sdk` 的 npm 发布版存在 ESM 扩展名 bug，本仓库通过 postinstall 补丁修复（见 `scripts/patch-snowluma-sdk.mjs`）
 
-## 合规提醒
+## 文档与开发
 
-SnowLuma 是独立第三方项目，与腾讯/QQ 无隶属关系，仅供学习与技术研究；使用前请阅读其 EULA 与《QQ 用户协议》。
+| 我想…… | 入口 |
+| --- | --- |
+| 安装、升级或排查连接 | [DSH 安装指南](docs/guides/DSH_SETUP.md) |
+| 了解模式、权限与管理命令 | [使用规则](RULES.md) |
+| 查看模型用量与费用口径 | [用量看板](docs/guides/TOKEN_USAGE_CONSOLE.md) |
+| 参与开发 | [贡献指南](CONTRIBUTING.md) · [安全基线](docs/guides/SECURITY_BASELINE.md) |
+| 报告安全漏洞 | [安全报告](SECURITY.md) |
+| 查找其他说明 | [文档索引](docs/README.md) |
+
+开发基于 `dev`，提交 PR 前运行离线回归：
+
+```powershell
+npm run test:audit
+```
+
+## 使用边界与许可
+
+- 仅在知情并获准的会话中使用，遵守平台规则；使用非官方 QQ 后端可能导致账号受限。
+- 聊天内容会经 DSH 发送给所配置的模型服务；黑话自动研究默认开启，可能将提取的关键词发送给搜索服务。数据流与关闭方式见 [NOTICE](NOTICE.md#四数据传输)。
+- 保护 `config.json`、`state/` 与控制台令牌，保持服务仅在本机可访问。
+- 本工具不实现 QQ 登录或底层协议，不安装、打包或启停 SnowLuma 后端；当前客户端仍依赖 `@snowluma/sdk` 等包，第三方组件适用各自条款。
+
+当前代码按 [PolyForm Noncommercial 1.0.0](LICENSE) 提供，限非商业用途；`v0.2.1-r1` 及更早已发布版本沿用其发布时的 MIT 许可。第三方组件、独立关系与使用风险见 [NOTICE](NOTICE.md)。
+- SnowLuma 是独立第三方项目，与腾讯/QQ 无隶属关系，仅供学习与技术研究；使用前请阅读其 EULA 与《QQ 用户协议》。

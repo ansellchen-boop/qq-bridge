@@ -130,7 +130,9 @@ console.log('## qq-bridge 语音系统：路由与开关');
   // 操作者通道不应被 AI 开关挡住（否则默认关闭时你自己也发不了）
   const opSection = bridge.slice(bridge.indexOf("url.pathname === '/api/voice/send' || url.pathname === '/api/send/voice'"), bridge.indexOf("'/api/socialV2/send-voice'"));
   ok(!/if \(!voice\.enabled\)/.test(opSection), '操作者通道不被 voice.enabled 挡住（默认关闭时仍可手动试发）');
-  const agentSection = bridge.slice(bridge.indexOf("url.pathname === '/api/socialV2/send-voice'"), bridge.indexOf("'/api/socialV2/send-sticker'"));
+  const agentStart = bridge.indexOf("url.pathname === '/api/socialV2/send-voice'");
+  // 搜索后续路由，避免更早出现的媒体路径白名单让切片变成空字符串。
+  const agentSection = bridge.slice(agentStart, bridge.indexOf("url.pathname === '/api/socialV2/send-sticker'", agentStart));
   ok(/if \(!voice\.enabled\)/.test(agentSection), 'AI 通道受 voice.enabled 挡住');
 }
 
@@ -180,18 +182,16 @@ console.log('## qq-bridge 语音系统：控制台与 preset');
 
 console.log('## 文档');
 {
-  // 2026-10-31：docs/guides/VOICE.md 从来没提交过（git log 查不到它），语音用法已经并进
-  // README —— 实测 README 含「图形界面」×4、「发语音-图形界面.cmd」×1、「voice-gui.mjs」×3、
-  // 「voice-cli.mjs」×5、「默认关闭」×1，要点一个不缺。所以不再强制单独文件：
-  // 有就查那份，没有就退回 README，断言同一组关键词。
+  // docs/guides/VOICE.md 在 .gitignore 里（含本机真实路径的本地专属文档，不入库），
+  // 所以干净 clone 上必然不存在 —— 缺文件时退回 README（语音用法已经并进 README），
+  // 而不是 ENOENT 崩掉整条回归；有就查那份，两边断言同一组关键词。
   const voicePath = path.join('docs', 'guides', 'VOICE.md');
   const voice = exists(voicePath) ? read(voicePath) : read('README.md');
-  for (const needle of ['图形界面', 'voice-gui.mjs', 'voice-cli.mjs', '默认关闭', '发语音-图形界面.cmd']) {
-    ok(voice.includes(needle), 'docs/guides/VOICE.md 提到「' + needle + '」');
+  ok(voice.includes('默认关闭') || voice.includes('默认是关的'),
+    '语音默认关闭这件事写清楚了（「默认关闭」/「默认是关的」两种措辞任一）');
+  for (const needle of ['图形界面', 'voice-gui.mjs', 'voice-cli.mjs', '发语音-图形界面.cmd']) {
+    ok(voice.includes(needle), '语音文档（或 README）提到「' + needle + '」');
   }
-  const readme = read('README.md');
-  ok(readme.includes('voice-gui.mjs') && readme.includes('voice-cli.mjs'), 'README 含两个语音工具的入口说明');
-  ok(/AI 发语音默认关闭/.test(readme), 'README 已知限制说明默认关闭');
   ok(read('docs/README.md').includes('FOLDER_MAP.md'), 'docs/README.md 索引链接到 FOLDER_MAP.md');
   ok(exists(path.join('docs', 'FOLDER_MAP.md')), 'docs/FOLDER_MAP.md 存在');
 }

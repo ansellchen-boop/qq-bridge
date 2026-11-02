@@ -9,6 +9,9 @@ config.json
 *.bak
 *.bak-*
 
+# SnowLuma MCP 的 catalog.js 投影（再分发其内容，见 NOTICE.md §2.2），不得提交
+_snowluma-catalog.json
+
 # Local development / planning / research docs (not part of public project)
 /PROJECT_GUIDE.md
 /ARCH_REVIEW.md
@@ -82,3 +85,6 @@ roles/_archive/
 *.tmp.js
 *.tmp.md
 *.bak[0-9]-*
+
+# pi-task 派活产物（每次运行新建，含实时日志与任务单副本）
+.pi-tasks/
